@@ -27,6 +27,8 @@
 - 📌 **Always on Top** - Answer popup stays visible above all windows
 - 📝 **One-Click Copy** - Copy the entire answer to clipboard instantly
 - ⌨️ **Keyboard Shortcuts** - Full hotkey support for quick access
+- ⚡ **Loading Indicator** - Small blinking logo at bottom-left shows when AI is processing
+- 👁️ **Quick Hide/Unhide** - Instantly toggle visibility of all UI elements with a hotkey
 
 ## 🖼️ Screenshot
 
@@ -88,6 +90,7 @@
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl + Alt + S` | Capture screen and get AI answer |
+| `Ctrl + Alt + I` | Hide/Unhide UI (popup & loading indicator) |
 | `Ctrl + Alt + Q` | Quit the application |
 | `ESC` | Close the answer popup |
 
@@ -109,6 +112,9 @@ HOTKEY = "ctrl+alt+s"
 
 # The Hotkey combination to quit the application
 QUIT_HOTKEY = "ctrl+alt+q"
+
+# The Hotkey combination to hide/unhide the popup
+HIDE_HOTKEY = "ctrl+alt+i"
 ```
 
 ## 📁 Project Structure
@@ -117,7 +123,10 @@ QUIT_HOTKEY = "ctrl+alt+q"
 elanswer/
 ├── main.py          # Main application file
 ├── README.md        # This file
-└── requirements.txt # Python dependencies
+├── requirements.txt # Python dependencies
+├── LICENSE          # MIT License
+└── assets/
+    └── logo.png     # Application logo
 ```
 
 ## 🔒 Privacy & Security

@@ -32,7 +32,7 @@ import os
 import time
 import keyboard  # For detecting key presses
 import google.generativeai as genai
-from PIL import ImageGrab  # For taking screenshots
+from PIL import ImageGrab, Image, ImageTk  # For taking screenshots and image handling
 import tkinter as tk
 from tkinter import scrolledtext
 import threading
@@ -59,10 +59,20 @@ HOTKEY = "ctrl+alt+s"
 # The Hotkey combination to quit the application
 QUIT_HOTKEY = "ctrl+alt+q"
 
+# The Hotkey combination to hide/unhide the popup
+HIDE_HOTKEY = "ctrl+alt+i"
+
 # ----------------------------------------------- #
 
 # Global variable for the popup window
 popup_window = None
+popup_hidden = False  # Track if popup is hidden
+loading_indicator = None  # Loading indicator window
+logo_image = None  # Store logo image reference
+
+# Get the directory where the script is located
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGO_PATH = os.path.join(SCRIPT_DIR, "assets", "logo.png")
 
 def configure_genai():
     """Configures the Gemini API."""
@@ -74,6 +84,117 @@ def configure_genai():
     # Using 1.5 Flash because it is fast and cheap for vision tasks
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     return model
+
+def show_loading_indicator():
+    """Shows a small blinking logo at the bottom left while Gemini is processing."""
+    global loading_indicator, logo_image
+    
+    # Close existing indicator if any
+    if loading_indicator and loading_indicator.winfo_exists():
+        loading_indicator.destroy()
+    
+    # Create loading indicator window
+    loading_indicator = tk.Toplevel()
+    loading_indicator.title("")
+    loading_indicator.overrideredirect(True)
+    
+    # Get screen dimensions for bottom-left positioning
+    screen_width = loading_indicator.winfo_screenwidth()
+    screen_height = loading_indicator.winfo_screenheight()
+    
+    # Small size - 48x48 logo
+    indicator_size = 48
+    padding = 20
+    x_pos = padding
+    y_pos = screen_height - indicator_size - padding - 40  # 40px above taskbar
+    
+    loading_indicator.geometry(f"{indicator_size}x{indicator_size}+{x_pos}+{y_pos}")
+    
+    # Make it always on top
+    loading_indicator.attributes('-topmost', True)
+    loading_indicator.attributes('-alpha', 0.95)
+    
+    # Make window undetectable (tool window style)
+    loading_indicator.update_idletasks()
+    hwnd = ctypes.windll.user32.GetParent(loading_indicator.winfo_id())
+    GWL_EXSTYLE = -20
+    ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_NOACTIVATE = 0x08000000
+    ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+    
+    # Transparent background
+    loading_indicator.configure(bg='#000000')
+    loading_indicator.wm_attributes('-transparentcolor', '#000000')
+    
+    # Load and resize logo
+    try:
+        img = Image.open(LOGO_PATH)
+        img = img.resize((indicator_size, indicator_size), Image.Resampling.LANCZOS)
+        logo_image = ImageTk.PhotoImage(img)
+        
+        logo_label = tk.Label(loading_indicator, image=logo_image, bg='#000000', borderwidth=0)
+        logo_label.pack()
+        
+        # Blinking animation
+        blink_state = [True]
+        def blink():
+            if not loading_indicator or not loading_indicator.winfo_exists():
+                return
+            if blink_state[0]:
+                loading_indicator.attributes('-alpha', 0.3)
+            else:
+                loading_indicator.attributes('-alpha', 0.95)
+            blink_state[0] = not blink_state[0]
+            loading_indicator.after(400, blink)
+        
+        # Start blinking
+        loading_indicator.after(100, blink)
+        
+    except Exception as e:
+        # Fallback to text if logo not found
+        print(f"[!] Could not load logo: {e}")
+        fallback_label = tk.Label(
+            loading_indicator,
+            text="⚡",
+            font=('Segoe UI', 24),
+            bg='#1a1a1a',
+            fg='#fbbf24'
+        )
+        fallback_label.pack(expand=True, fill=tk.BOTH)
+        
+        # Blinking for fallback
+        blink_state = [True]
+        def blink():
+            if not loading_indicator or not loading_indicator.winfo_exists():
+                return
+            if blink_state[0]:
+                fallback_label.config(fg='#fbbf24')
+            else:
+                fallback_label.config(fg='#78350f')
+            blink_state[0] = not blink_state[0]
+            loading_indicator.after(400, blink)
+        
+        loading_indicator.after(100, blink)
+
+def hide_loading_indicator():
+    """Hides and destroys the loading indicator."""
+    global loading_indicator
+    
+    if loading_indicator and loading_indicator.winfo_exists():
+        # Fade out animation
+        def fade_out(alpha=0.95):
+            if not loading_indicator or not loading_indicator.winfo_exists():
+                return
+            if alpha > 0:
+                alpha -= 0.15
+                loading_indicator.attributes('-alpha', max(0, alpha))
+                loading_indicator.after(20, lambda: fade_out(alpha))
+            else:
+                loading_indicator.destroy()
+        
+        fade_out()
 
 def show_answer_popup(answer_text):
     """Creates a clean, professional popup window matching the reference design."""
@@ -367,6 +488,9 @@ def analyze_screen():
     """Captures screen, sends to Gemini, and displays answer in popup."""
     print("\n[+] Hotkey detected! Capturing screen...")
     
+    # Show loading indicator on main thread
+    root.after(0, show_loading_indicator)
+    
     def process_and_display():
         try:
             # 1. Capture the entire screen
@@ -391,19 +515,22 @@ def analyze_screen():
             # 4. Send to Gemini
             response = model.generate_content([prompt, screenshot])
             
-            # 5. Display result in popup
+            # 5. Hide loading indicator and display result in popup
             answer = response.text
             print("[✓] Answer received. Displaying popup...")
             
-            # Show popup on main thread
-            root.after(0, lambda: show_answer_popup(answer))
+            # Hide loading indicator and show popup on main thread
+            root.after(0, hide_loading_indicator)
+            root.after(50, lambda: show_answer_popup(answer))
             
             print(f"Ready for next query. Press {HOTKEY}...")
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             print(f"\n[!] {error_msg}")
-            root.after(0, lambda: show_answer_popup(error_msg))
+            # Hide loading indicator and show error
+            root.after(0, hide_loading_indicator)
+            root.after(50, lambda: show_answer_popup(error_msg))
     
     # Run analysis in separate thread to avoid blocking
     threading.Thread(target=process_and_display, daemon=True).start()
@@ -414,6 +541,35 @@ def quit_application():
     root.quit()
     root.destroy()
     os._exit(0)
+
+def toggle_popup_visibility():
+    """Toggle the visibility of the popup window and loading indicator."""
+    global popup_window, popup_hidden, loading_indicator
+    
+    has_popup = popup_window and popup_window.winfo_exists()
+    has_loading = loading_indicator and loading_indicator.winfo_exists()
+    
+    if has_popup or has_loading:
+        if popup_hidden:
+            # Show the windows
+            if has_popup:
+                popup_window.deiconify()
+                popup_window.attributes('-alpha', 0.98)
+            if has_loading:
+                loading_indicator.deiconify()
+                loading_indicator.attributes('-alpha', 0.95)
+            popup_hidden = False
+            print("[+] UI shown")
+        else:
+            # Hide the windows
+            if has_popup:
+                popup_window.withdraw()
+            if has_loading:
+                loading_indicator.withdraw()
+            popup_hidden = True
+            print("[-] UI hidden")
+    else:
+        print("[!] No UI elements to hide/show")
 
 # Main Execution
 if __name__ == "__main__":
@@ -426,8 +582,9 @@ if __name__ == "__main__":
         print(f"\n📋 Instructions:")
         print(f"  1. Open your document/quiz/code on screen")
         print(f"  2. Press [{HOTKEY}] to get AI answer")
-        print(f"  3. Press [{QUIT_HOTKEY}] to quit")
-        print(f"  4. Or close this window to quit\n")
+        print(f"  3. Press [{HIDE_HOTKEY}] to hide/unhide popup")
+        print(f"  4. Press [{QUIT_HOTKEY}] to quit")
+        print(f"  5. Or close this window to quit\n")
         print("⚡ Status: Ready and waiting...\n")
         
         # Create hidden root window for tkinter
@@ -436,6 +593,7 @@ if __name__ == "__main__":
         
         # Add the hotkey listeners
         keyboard.add_hotkey(HOTKEY, analyze_screen)
+        keyboard.add_hotkey(HIDE_HOTKEY, toggle_popup_visibility)
         keyboard.add_hotkey(QUIT_HOTKEY, quit_application)
         
         # Suppress Ctrl+C in terminal by blocking keyboard module from capturing it
