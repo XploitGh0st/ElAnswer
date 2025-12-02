@@ -25,6 +25,8 @@
 - 🎨 **Modern UI** - Clean, professional popup with rounded corners and smooth animations
 - 🌙 **Dark/Light Theme** - Toggle between dark and light modes with a hotkey
 - 📍 **Position Memory** - Popup remembers where you last placed it
+- 📚 **History** - Access your recent captures and answers anytime
+- 📥 **System Tray** - Runs minimized in system tray, no console window
 - 👻 **Stealth Mode** - Window is undetectable by other apps (no taskbar, no Alt+Tab)
 - 📌 **Always on Top** - Answer popup stays visible above all windows
 - 📝 **One-Click Copy** - Copy the entire answer to clipboard instantly
@@ -73,7 +75,7 @@
 
 2. **Install dependencies**
    ```bash
-   pip install google-generativeai keyboard pillow
+   pip install google-generativeai keyboard pillow pystray
    ```
 
 3. **Configure your API key**
@@ -93,10 +95,22 @@
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl + Alt + S` | Capture screen and get AI answer |
+| `Ctrl + Alt + H` | View answer history |
 | `Ctrl + Alt + I` | Hide/Unhide UI (popup & loading indicator) |
 | `Ctrl + Alt + T` | Toggle dark/light theme |
 | `Ctrl + Alt + Q` | Quit the application |
 | `ESC` | Close the answer popup |
+
+## 📥 System Tray
+
+ElAnswer runs minimized in your system tray (notification area). Right-click the tray icon to:
+
+- **Capture Screen** - Trigger a screen capture (or double-click the icon)
+- **Recent Answers** - Quick access to your last 5 answers
+- **View History** - Open the full history popup
+- **Dark Mode** - Toggle between dark and light themes
+- **Hide/Show UI** - Toggle visibility of popup windows
+- **Quit** - Exit the application
 
 ## 🎯 Use Cases
 
@@ -122,6 +136,12 @@ HIDE_HOTKEY = "ctrl+alt+i"
 
 # The Hotkey combination to toggle theme (dark/light)
 THEME_HOTKEY = "ctrl+alt+t"
+
+# The Hotkey combination to show history
+HISTORY_HOTKEY = "ctrl+alt+h"
+
+# Maximum number of history items to keep
+MAX_HISTORY_ITEMS = 10
 ```
 
 ### Persistent Settings
@@ -131,12 +151,22 @@ ElAnswer automatically saves your preferences to `config.json`:
 - **Popup Position** - Drag the popup anywhere and it will remember the location
 - **Theme Preference** - Your dark/light mode choice is saved automatically
 
+### Answer History
+
+Your recent answers are saved to `history.json`:
+
+- Stores up to 10 recent answers (configurable via `MAX_HISTORY_ITEMS`)
+- Access via `Ctrl + Alt + H` or system tray menu
+- Click any history item to view the full answer
+- Clear history anytime from the history popup
+
 ## 📁 Project Structure
 
 ```
 elanswer/
 ├── main.py          # Main application file
 ├── config.json      # User preferences (auto-generated)
+├── history.json     # Answer history (auto-generated)
 ├── README.md        # This file
 ├── requirements.txt # Python dependencies
 ├── LICENSE          # MIT License
@@ -173,6 +203,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Google Gemini](https://deepmind.google/technologies/gemini/) - AI model for image analysis
 - [Python Keyboard](https://github.com/boppreh/keyboard) - Global hotkey detection
 - [Pillow](https://python-pillow.org/) - Screen capture functionality
+- [pystray](https://github.com/moses-palmer/pystray) - System tray icon support
 
 ---
 

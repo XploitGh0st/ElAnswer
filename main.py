@@ -29,7 +29,9 @@
 """
 
 import os
+import sys
 import json
+from datetime import datetime
 import keyboard  # For detecting key presses
 import google.generativeai as genai
 from PIL import ImageGrab, Image, ImageTk  # For taking screenshots and image handling
@@ -37,6 +39,7 @@ import tkinter as tk
 from tkinter import scrolledtext
 import threading
 import ctypes
+import pystray  # For system tray icon
 
 # Enable High DPI awareness for crisp rendering
 try:
@@ -65,6 +68,12 @@ HIDE_HOTKEY = "ctrl+alt+i"
 # The Hotkey combination to toggle theme (dark/light)
 THEME_HOTKEY = "ctrl+alt+t"
 
+# The Hotkey combination to show history
+HISTORY_HOTKEY = "ctrl+alt+h"
+
+# Maximum number of history items to keep
+MAX_HISTORY_ITEMS = 10
+
 # ----------------------------------------------- #
 
 # Global variable for the popup window
@@ -72,11 +81,16 @@ popup_window = None
 popup_hidden = False  # Track if popup is hidden
 loading_indicator = None  # Loading indicator window
 logo_image = None  # Store logo image reference
+tray_icon = None  # System tray icon
 
 # Get the directory where the script is located
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(SCRIPT_DIR, "assets", "logo.png")
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
+HISTORY_PATH = os.path.join(SCRIPT_DIR, "history.json")
+
+# History storage
+answer_history = []
 
 # Theme definitions
 THEMES = {
@@ -129,8 +143,81 @@ def save_config(config):
     except Exception as e:
         print(f"[!] Could not save config: {e}")
 
+def load_history():
+    """Load answer history from file."""
+    global answer_history
+    try:
+        if os.path.exists(HISTORY_PATH):
+            with open(HISTORY_PATH, 'r', encoding='utf-8') as f:
+                answer_history = json.load(f)
+                # Trim to max items
+                answer_history = answer_history[:MAX_HISTORY_ITEMS]
+    except Exception as e:
+        print(f"[!] Could not load history: {e}")
+        answer_history = []
+
+def save_history():
+    """Save answer history to file."""
+    try:
+        with open(HISTORY_PATH, 'w', encoding='utf-8') as f:
+            json.dump(answer_history[:MAX_HISTORY_ITEMS], f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[!] Could not save history: {e}")
+
+def add_to_history(answer_text):
+    """Add a new answer to history."""
+    global answer_history
+    
+    # Create history entry
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "preview": extract_preview(answer_text),
+        "answer": answer_text
+    }
+    
+    # Add to beginning of list
+    answer_history.insert(0, entry)
+    
+    # Trim to max items
+    answer_history = answer_history[:MAX_HISTORY_ITEMS]
+    
+    # Save to file
+    save_history()
+    
+    # Update tray menu if available
+    if tray_icon:
+        tray_icon.update_menu()
+
+def extract_preview(answer_text):
+    """Extract a short preview from the answer text."""
+    # Try to find the QUESTION section
+    lines = answer_text.split('\n')
+    for i, line in enumerate(lines):
+        if 'QUESTION:' in line:
+            # Get the next non-empty line as preview
+            for j in range(i + 1, min(i + 3, len(lines))):
+                preview_line = lines[j].strip()
+                if preview_line and not preview_line.startswith('['):
+                    # Truncate if too long
+                    if len(preview_line) > 50:
+                        return preview_line[:47] + "..."
+                    return preview_line
+    
+    # Fallback: use first non-empty line
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith('📋') and not line.startswith('✅') and not line.startswith('💡'):
+            if len(line) > 50:
+                return line[:47] + "..."
+            return line
+    
+    return "Answer captured"
+
 # Load saved configuration
 app_config = load_config()
+
+# Load answer history
+load_history()
 
 def configure_genai():
     """Configures the Gemini API."""
@@ -599,6 +686,9 @@ def analyze_screen():
             answer = response.text
             print("[✓] Answer received. Displaying popup...")
             
+            # Add to history
+            add_to_history(answer)
+            
             # Hide loading indicator and show popup on main thread
             root.after(0, hide_loading_indicator)
             root.after(50, lambda: show_answer_popup(answer))
@@ -617,7 +707,12 @@ def analyze_screen():
 
 def quit_application():
     """Gracefully quit the application."""
-    print("\n\n👋 ElAnswer closed. Goodbye!")
+    global tray_icon
+    
+    # Stop the tray icon if running
+    if tray_icon:
+        tray_icon.stop()
+    
     root.quit()
     root.destroy()
     os._exit(0)
@@ -651,6 +746,247 @@ def toggle_popup_visibility():
     else:
         print("[!] No UI elements to hide/show")
 
+def show_history_popup():
+    """Show the history popup with recent answers."""
+    global popup_window, app_config
+    
+    if not answer_history:
+        # Show message if no history
+        show_answer_popup("📚 History is empty\n\nCapture some screens first!\nPress Ctrl+Alt+S to start.")
+        return
+    
+    # Close existing popup if any
+    if popup_window and popup_window.winfo_exists():
+        popup_window.destroy()
+    
+    # Get saved position and theme
+    popup_x = app_config.get("popup_x", 200)
+    popup_y = app_config.get("popup_y", 80)
+    current_theme = app_config.get("theme", "light")
+    theme = THEMES[current_theme]
+    
+    # Create new popup window
+    popup_window = tk.Toplevel()
+    popup_window.title("")
+    popup_window.geometry(f"400x450+{popup_x}+{popup_y}")
+    popup_window.overrideredirect(True)
+    
+    # Make it always on top
+    popup_window.attributes('-topmost', True)
+    popup_window.attributes('-alpha', 0.0)
+    
+    # Make window undetectable
+    popup_window.update_idletasks()
+    hwnd = ctypes.windll.user32.GetParent(popup_window.winfo_id())
+    GWL_EXSTYLE = -20
+    ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_NOACTIVATE = 0x08000000
+    ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+    
+    # Get colors from current theme
+    card_bg = theme['card_bg']
+    text_color = theme['text_color']
+    secondary_text = theme['secondary_text']
+    border_color = theme['border_color']
+    accent_color = theme['accent_color']
+    light_gray = theme['light_gray']
+    
+    # Make window transparent for rounded corners
+    popup_window.configure(bg='#000000')
+    popup_window.wm_attributes('-transparentcolor', '#000000')
+    
+    # Main canvas for rounded corners
+    canvas = tk.Canvas(popup_window, width=400, height=450, bg='#000000', highlightthickness=0)
+    canvas.pack(fill=tk.BOTH, expand=True)
+    
+    # Draw rounded rectangle background
+    radius = 16
+    x1, y1, x2, y2 = 0, 0, 400, 450
+    
+    canvas.create_arc(x1, y1, x1+radius*2, y1+radius*2, start=90, extent=90, fill=card_bg, outline=card_bg)
+    canvas.create_arc(x2-radius*2, y1, x2, y1+radius*2, start=0, extent=90, fill=card_bg, outline=card_bg)
+    canvas.create_arc(x1, y2-radius*2, x1+radius*2, y2, start=180, extent=90, fill=card_bg, outline=card_bg)
+    canvas.create_arc(x2-radius*2, y2-radius*2, x2, y2, start=270, extent=90, fill=card_bg, outline=card_bg)
+    canvas.create_rectangle(x1+radius, y1, x2-radius, y2, fill=card_bg, outline=card_bg)
+    canvas.create_rectangle(x1, y1+radius, x2, y2-radius, fill=card_bg, outline=card_bg)
+    
+    # Main card frame
+    main_card = tk.Frame(canvas, bg=card_bg)
+    canvas.create_window(200, 225, window=main_card, width=396, height=446)
+    
+    # Top bar
+    top_bar = tk.Frame(main_card, bg=card_bg, height=50)
+    top_bar.pack(fill=tk.X)
+    top_bar.pack_propagate(False)
+    
+    # Close button
+    close_btn = tk.Label(
+        top_bar,
+        text="×",
+        font=('Segoe UI', 22),
+        bg=card_bg,
+        fg=theme['close_btn_fg'],
+        cursor='hand2'
+    )
+    close_btn.pack(side=tk.RIGHT, padx=16)
+    close_btn.bind('<Enter>', lambda e: close_btn.config(fg=theme['close_btn_hover']))
+    close_btn.bind('<Leave>', lambda e: close_btn.config(fg=theme['close_btn_fg']))
+    close_btn.bind('<Button-1>', lambda e: fade_out())
+    
+    # Separator
+    sep1 = tk.Frame(main_card, bg=border_color, height=1)
+    sep1.pack(fill=tk.X)
+    
+    # Header
+    header_section = tk.Frame(main_card, bg=card_bg)
+    header_section.pack(fill=tk.X, padx=20, pady=(16, 12))
+    
+    title_row = tk.Frame(header_section, bg=card_bg)
+    title_row.pack(fill=tk.X)
+    
+    icon_label = tk.Label(title_row, text="📚", font=('Segoe UI', 14), bg=card_bg, fg=text_color)
+    icon_label.pack(side=tk.LEFT, padx=(0, 8))
+    
+    title_label = tk.Label(title_row, text="Recent Answers", font=('Segoe UI', 14, 'bold'), bg=card_bg, fg=text_color)
+    title_label.pack(side=tk.LEFT)
+    
+    count_label = tk.Label(title_row, text=f"({len(answer_history)})", font=('Segoe UI', 10), bg=card_bg, fg=secondary_text)
+    count_label.pack(side=tk.LEFT, padx=(8, 0))
+    
+    # Scrollable list container
+    list_container = tk.Frame(main_card, bg=card_bg)
+    list_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 12))
+    
+    # Create canvas for scrolling
+    list_canvas = tk.Canvas(list_container, bg=card_bg, highlightthickness=0)
+    scrollbar = tk.Scrollbar(list_container, orient="vertical", command=list_canvas.yview)
+    scrollable_frame = tk.Frame(list_canvas, bg=card_bg)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: list_canvas.configure(scrollregion=list_canvas.bbox("all"))
+    )
+    
+    list_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw", width=340)
+    list_canvas.configure(yscrollcommand=scrollbar.set)
+    
+    list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    # Mouse wheel scrolling
+    def on_mousewheel(event):
+        list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+    list_canvas.bind_all("<MouseWheel>", on_mousewheel)
+    
+    # Add history items
+    for i, entry in enumerate(answer_history):
+        item_frame = tk.Frame(scrollable_frame, bg=light_gray, cursor='hand2')
+        item_frame.pack(fill=tk.X, pady=(0, 8))
+        
+        # Inner padding
+        inner_frame = tk.Frame(item_frame, bg=light_gray)
+        inner_frame.pack(fill=tk.X, padx=12, pady=10)
+        
+        # Timestamp
+        time_label = tk.Label(
+            inner_frame,
+            text=entry['timestamp'],
+            font=('Segoe UI', 8),
+            bg=light_gray,
+            fg=secondary_text
+        )
+        time_label.pack(anchor='w')
+        
+        # Preview
+        preview_label = tk.Label(
+            inner_frame,
+            text=entry['preview'],
+            font=('Segoe UI', 10),
+            bg=light_gray,
+            fg=text_color,
+            anchor='w',
+            justify='left'
+        )
+        preview_label.pack(anchor='w', pady=(4, 0))
+        
+        # Click handler
+        answer_text = entry['answer']
+        def make_click_handler(text):
+            return lambda e: (popup_window.destroy(), root.after(50, lambda: show_answer_popup(text)))
+        
+        for widget in [item_frame, inner_frame, time_label, preview_label]:
+            widget.bind('<Button-1>', make_click_handler(answer_text))
+            widget.bind('<Enter>', lambda e, f=item_frame: f.config(bg=border_color) or [w.config(bg=border_color) for w in f.winfo_children()] or [w.config(bg=border_color) for c in f.winfo_children() for w in c.winfo_children()])
+            widget.bind('<Leave>', lambda e, f=item_frame: f.config(bg=light_gray) or [w.config(bg=light_gray) for w in f.winfo_children()] or [w.config(bg=light_gray) for c in f.winfo_children() for w in c.winfo_children()])
+    
+    # Footer with clear button
+    footer = tk.Frame(main_card, bg=card_bg)
+    footer.pack(fill=tk.X, padx=20, pady=(0, 16))
+    
+    def clear_history():
+        global answer_history
+        answer_history = []
+        save_history()
+        if tray_icon:
+            tray_icon.update_menu()
+        fade_out()
+    
+    clear_btn = tk.Button(
+        footer,
+        text="Clear History",
+        command=clear_history,
+        font=('Segoe UI', 9),
+        bg=card_bg,
+        fg=secondary_text,
+        relief=tk.SOLID,
+        padx=12,
+        pady=4,
+        cursor='hand2',
+        borderwidth=1
+    )
+    clear_btn.pack(side=tk.LEFT)
+    
+    hint_label = tk.Label(footer, text="Click to view", font=('Segoe UI', 9), bg=card_bg, fg='#9ca3af')
+    hint_label.pack(side=tk.RIGHT)
+    
+    # Animations
+    def fade_in(alpha=0.0):
+        if alpha < 0.98:
+            alpha += 0.1
+            popup_window.attributes('-alpha', alpha)
+            popup_window.after(15, lambda: fade_in(alpha))
+        else:
+            popup_window.attributes('-alpha', 0.98)
+    
+    def fade_out(alpha=0.98):
+        if alpha > 0:
+            alpha -= 0.12
+            popup_window.attributes('-alpha', alpha)
+            popup_window.after(12, lambda: fade_out(alpha))
+        else:
+            list_canvas.unbind_all("<MouseWheel>")
+            popup_window.destroy()
+    
+    popup_window.bind('<Escape>', lambda e: fade_out())
+    
+    # Draggable
+    def start_move(event):
+        popup_window.x = event.x
+        popup_window.y = event.y
+    
+    def do_move(event):
+        x = popup_window.winfo_x() + (event.x - popup_window.x)
+        y = popup_window.winfo_y() + (event.y - popup_window.y)
+        popup_window.geometry(f"+{x}+{y}")
+    
+    for widget in [top_bar, header_section, title_row, title_label]:
+        widget.bind('<Button-1>', start_move)
+        widget.bind('<B1-Motion>', do_move)
+    
+    popup_window.after(10, fade_in)
+
 def toggle_theme():
     """Toggle between dark and light themes."""
     global app_config, popup_window
@@ -675,25 +1011,132 @@ def toggle_theme():
             pass
 
 
+def create_tray_icon():
+    """Creates and returns the system tray icon with menu."""
+    global tray_icon
+    
+    # Load the icon image
+    try:
+        icon_image = Image.open(LOGO_PATH)
+        icon_image = icon_image.resize((64, 64), Image.Resampling.LANCZOS)
+    except Exception:
+        # Create a simple fallback icon if logo not found
+        icon_image = Image.new('RGB', (64, 64), color='#fbbf24')
+    
+    def on_capture(icon, item):
+        """Trigger screen capture from tray menu."""
+        root.after(0, analyze_screen)
+    
+    def on_toggle_theme(icon, item):
+        """Toggle theme from tray menu."""
+        root.after(0, toggle_theme)
+        icon.update_menu()
+    
+    def on_hide_ui(icon, item):
+        """Toggle UI visibility from tray menu."""
+        root.after(0, toggle_popup_visibility)
+    
+    def on_show_history(icon, item):
+        """Show history popup from tray menu."""
+        root.after(0, show_history_popup)
+    
+    def on_quit(icon, item):
+        """Quit from tray menu."""
+        root.after(0, quit_application)
+    
+    def is_dark_theme():
+        """Check if dark theme is active."""
+        return app_config.get("theme", "light") == "dark"
+    
+    def get_history_items():
+        """Generate history submenu items."""
+        if not answer_history:
+            return [pystray.MenuItem("No history yet", None, enabled=False)]
+        
+        items = []
+        for i, entry in enumerate(answer_history[:5]):  # Show last 5 in tray
+            preview = entry['preview'][:30] + "..." if len(entry['preview']) > 30 else entry['preview']
+            def make_handler(text):
+                return lambda icon, item: root.after(0, lambda: show_answer_popup(text))
+            items.append(pystray.MenuItem(preview, make_handler(entry['answer'])))
+        
+        if len(answer_history) > 5:
+            items.append(pystray.Menu.SEPARATOR)
+            items.append(pystray.MenuItem(f"View all ({len(answer_history)})...", lambda icon, item: root.after(0, show_history_popup)))
+        
+        return items
+    
+    # Create the menu
+    menu = pystray.Menu(
+        pystray.MenuItem(
+            f"Capture Screen ({HOTKEY})",
+            on_capture,
+            default=True  # Double-click action
+        ),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem(
+            "Recent Answers",
+            pystray.Menu(lambda: get_history_items())
+        ),
+        pystray.MenuItem(
+            f"View History ({HISTORY_HOTKEY})",
+            on_show_history
+        ),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem(
+            "Dark Mode",
+            on_toggle_theme,
+            checked=lambda item: is_dark_theme()
+        ),
+        pystray.MenuItem(
+            f"Hide/Show UI ({HIDE_HOTKEY})",
+            on_hide_ui
+        ),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem(
+            f"Quit ({QUIT_HOTKEY})",
+            on_quit
+        )
+    )
+    
+    # Create the icon
+    tray_icon = pystray.Icon(
+        "ElAnswer",
+        icon_image,
+        "ElAnswer - AI Screen Solver",
+        menu
+    )
+    
+    return tray_icon
+
+
+def run_tray_icon():
+    """Run the system tray icon in a separate thread."""
+    icon = create_tray_icon()
+    icon.run()
+
+
+# Hide console window on Windows
+def hide_console():
+    """Hide the console window on Windows."""
+    if sys.platform == 'win32':
+        try:
+            # Get the console window handle
+            kernel32 = ctypes.WinDLL('kernel32')
+            user32 = ctypes.WinDLL('user32')
+            
+            hwnd = kernel32.GetConsoleWindow()
+            if hwnd:
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
+        except Exception:
+            pass
+
+
 # Main Execution
 if __name__ == "__main__":
     model = configure_genai()
     
     if model:
-        print("="*50)
-        print("       ✨ ElAnswer - AI Screen Solver ✨")
-        print("="*50)
-        print(f"\n📋 Instructions:")
-        print(f"  1. Open your document/quiz/code on screen")
-        print(f"  2. Press [{HOTKEY}] to get AI answer")
-        print(f"  3. Press [{HIDE_HOTKEY}] to hide/unhide popup")
-        print(f"  4. Press [{THEME_HOTKEY}] to toggle dark/light theme")
-        print(f"  5. Press [{QUIT_HOTKEY}] to quit")
-        print(f"  6. Or close this window to quit\n")
-        current_theme = app_config.get('theme', 'light')
-        theme_icon = "🌙" if current_theme == "dark" else "☀️"
-        print(f"⚡ Status: Ready and waiting... (Theme: {current_theme} {theme_icon})\n")
-        
         # Create hidden root window for tkinter
         root = tk.Tk()
         root.withdraw()  # Hide the main window
@@ -702,12 +1145,18 @@ if __name__ == "__main__":
         keyboard.add_hotkey(HOTKEY, analyze_screen)
         keyboard.add_hotkey(HIDE_HOTKEY, toggle_popup_visibility)
         keyboard.add_hotkey(THEME_HOTKEY, toggle_theme)
+        keyboard.add_hotkey(HISTORY_HOTKEY, show_history_popup)
         keyboard.add_hotkey(QUIT_HOTKEY, quit_application)
         
-        # Suppress Ctrl+C in terminal by blocking keyboard module from capturing it
+        # Start system tray icon in separate thread
+        tray_thread = threading.Thread(target=run_tray_icon, daemon=True)
+        tray_thread.start()
+        
+        # Hide console window (runs minimized in system tray)
+        hide_console()
+        
+        # Run tkinter main loop (keeps GUI responsive)
         try:
-            # Run tkinter main loop (keeps GUI responsive)
             root.mainloop()
         except KeyboardInterrupt:
-            print("\n\n👋 ElAnswer closed. Goodbye!")
-            pass
+            quit_application()

@@ -1,6 +1,9 @@
 # User configuration (contains personal settings)
 config.json
 
+# Answer history (contains user data)
+history.json
+
 # Python
 __pycache__/
 *.py[cod]
