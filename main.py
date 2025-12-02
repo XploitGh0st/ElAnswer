@@ -7,7 +7,7 @@
 ║  Description:  Captures screen content and uses Google Gemini AI to          ║
 ║                analyze and solve questions, problems, or code snippets.      ║
 ║                                                                               ║
-║  Version:      1.0.0                                                          ║
+║  Version:      1.1.0                                                          ║
 ║  Created:      December 2025                                                  ║
 ║  License:      MIT                                                            ║
 ║                                                                               ║
@@ -29,7 +29,7 @@
 """
 
 import os
-import time
+import json
 import keyboard  # For detecting key presses
 import google.generativeai as genai
 from PIL import ImageGrab, Image, ImageTk  # For taking screenshots and image handling
@@ -62,6 +62,9 @@ QUIT_HOTKEY = "ctrl+alt+q"
 # The Hotkey combination to hide/unhide the popup
 HIDE_HOTKEY = "ctrl+alt+i"
 
+# The Hotkey combination to toggle theme (dark/light)
+THEME_HOTKEY = "ctrl+alt+t"
+
 # ----------------------------------------------- #
 
 # Global variable for the popup window
@@ -73,6 +76,61 @@ logo_image = None  # Store logo image reference
 # Get the directory where the script is located
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(SCRIPT_DIR, "assets", "logo.png")
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
+
+# Theme definitions
+THEMES = {
+    "light": {
+        "card_bg": '#ffffff',
+        "text_color": '#1a1a1a',
+        "secondary_text": '#6b7280',
+        "border_color": '#e5e7eb',
+        "accent_color": '#18181b',
+        "green_accent": '#22c55e',
+        "light_gray": '#f9fafb',
+        "close_btn_fg": '#9ca3af',
+        "close_btn_hover": '#374151',
+        "btn_hover": '#374151',
+        "pulse_color": '#4ade80',
+    },
+    "dark": {
+        "card_bg": '#1f2937',
+        "text_color": '#f9fafb',
+        "secondary_text": '#9ca3af',
+        "border_color": '#374151',
+        "accent_color": '#3b82f6',
+        "green_accent": '#22c55e',
+        "light_gray": '#111827',
+        "close_btn_fg": '#6b7280',
+        "close_btn_hover": '#d1d5db',
+        "btn_hover": '#2563eb',
+        "pulse_color": '#4ade80',
+    }
+}
+
+def load_config():
+    """Load configuration from file."""
+    default_config = {"popup_x": 200, "popup_y": 80, "theme": "light"}
+    try:
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, 'r') as f:
+                config = json.load(f)
+                # Merge with defaults to ensure all keys exist
+                return {**default_config, **config}
+    except Exception as e:
+        print(f"[!] Could not load config: {e}")
+    return default_config
+
+def save_config(config):
+    """Save configuration to file."""
+    try:
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        print(f"[!] Could not save config: {e}")
+
+# Load saved configuration
+app_config = load_config()
 
 def configure_genai():
     """Configures the Gemini API."""
@@ -198,16 +256,22 @@ def hide_loading_indicator():
 
 def show_answer_popup(answer_text):
     """Creates a clean, professional popup window matching the reference design."""
-    global popup_window
+    global popup_window, app_config
     
     # Close existing popup if any
     if popup_window and popup_window.winfo_exists():
         popup_window.destroy()
     
+    # Get saved position and theme
+    popup_x = app_config.get("popup_x", 200)
+    popup_y = app_config.get("popup_y", 80)
+    current_theme = app_config.get("theme", "light")
+    theme = THEMES[current_theme]
+    
     # Create new popup window
     popup_window = tk.Toplevel()
     popup_window.title("")
-    popup_window.geometry("480x520+200+80")
+    popup_window.geometry(f"480x520+{popup_x}+{popup_y}")
     popup_window.overrideredirect(True)
     
     # Make it always on top
@@ -227,14 +291,14 @@ def show_answer_popup(answer_text):
     ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
     ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
     
-    # Clean, minimal color scheme (matching reference image)
-    card_bg = '#ffffff'
-    text_color = '#1a1a1a'
-    secondary_text = '#6b7280'
-    border_color = '#e5e7eb'
-    accent_color = '#18181b'
-    green_accent = '#22c55e'
-    light_gray = '#f9fafb'
+    # Get colors from current theme
+    card_bg = theme['card_bg']
+    text_color = theme['text_color']
+    secondary_text = theme['secondary_text']
+    border_color = theme['border_color']
+    accent_color = theme['accent_color']
+    green_accent = theme['green_accent']
+    light_gray = theme['light_gray']
     
     # Make window transparent for rounded corners
     popup_window.configure(bg='#000000')
@@ -275,8 +339,8 @@ def show_answer_popup(answer_text):
         cursor='hand2'
     )
     close_btn.pack(side=tk.RIGHT, padx=16)
-    close_btn.bind('<Enter>', lambda e: close_btn.config(fg='#374151'))
-    close_btn.bind('<Leave>', lambda e: close_btn.config(fg='#9ca3af'))
+    close_btn.bind('<Enter>', lambda e: close_btn.config(fg=theme['close_btn_hover']))
+    close_btn.bind('<Leave>', lambda e: close_btn.config(fg=theme['close_btn_fg']))
     close_btn.bind('<Button-1>', lambda e: fade_out_window())
     
     # Separator
@@ -353,6 +417,9 @@ def show_answer_popup(answer_text):
     text_area.insert(tk.END, answer_text)
     text_area.config(state=tk.NORMAL)
     
+    # Store answer text for theme refresh
+    popup_window._answer_text = answer_text
+    
     # Footer section
     footer_section = tk.Frame(main_card, bg=card_bg)
     footer_section.pack(fill=tk.X, padx=24, pady=(0, 20))
@@ -401,7 +468,7 @@ def show_answer_popup(answer_text):
         activeforeground='white'
     )
     copy_btn.pack(side=tk.LEFT, padx=(0, 8))
-    copy_btn.bind('<Enter>', lambda e: copy_btn.config(bg='#374151'))
+    copy_btn.bind('<Enter>', lambda e: copy_btn.config(bg=theme['btn_hover']))
     copy_btn.bind('<Leave>', lambda e: copy_btn.config(bg=accent_color))
     
     # Close button (secondary - outline style)
@@ -443,12 +510,20 @@ def show_answer_popup(answer_text):
         else:
             popup_window.attributes('-alpha', 0.98)
     
+    def save_popup_position():
+        """Save current popup position to config."""
+        if popup_window and popup_window.winfo_exists():
+            app_config["popup_x"] = popup_window.winfo_x()
+            app_config["popup_y"] = popup_window.winfo_y()
+            save_config(app_config)
+    
     def fade_out_window(alpha=0.98):
         if alpha > 0:
             alpha -= 0.12
             popup_window.attributes('-alpha', alpha)
             popup_window.after(12, lambda: fade_out_window(alpha))
         else:
+            save_popup_position()  # Save position before destroying
             popup_window.destroy()
     
     # Status dot pulse
@@ -457,7 +532,7 @@ def show_answer_popup(answer_text):
         if not popup_window.winfo_exists():
             return
         if pulse_state[0]:
-            status_dot.itemconfig(1, fill='#4ade80')
+            status_dot.itemconfig(1, fill=theme['pulse_color'])
         else:
             status_dot.itemconfig(1, fill=green_accent)
         pulse_state[0] = not pulse_state[0]
@@ -476,9 +551,14 @@ def show_answer_popup(answer_text):
         y = popup_window.winfo_y() + (event.y - popup_window.y)
         popup_window.geometry(f"+{x}+{y}")
     
+    def end_move(event):
+        """Save position after drag ends."""
+        save_popup_position()
+    
     for widget in [top_bar, header_section, title_row, title_label]:
         widget.bind('<Button-1>', start_move)
         widget.bind('<B1-Motion>', do_move)
+        widget.bind('<ButtonRelease-1>', end_move)
     
     # Start animations
     popup_window.after(10, fade_in)
@@ -571,6 +651,30 @@ def toggle_popup_visibility():
     else:
         print("[!] No UI elements to hide/show")
 
+def toggle_theme():
+    """Toggle between dark and light themes."""
+    global app_config, popup_window
+    
+    current_theme = app_config.get("theme", "light")
+    new_theme = "dark" if current_theme == "light" else "light"
+    app_config["theme"] = new_theme
+    save_config(app_config)
+    
+    theme_icon = "🌙" if new_theme == "dark" else "☀️"
+    print(f"[+] Theme switched to {new_theme} mode {theme_icon}")
+    
+    # If popup is open, refresh it with the new theme
+    if popup_window and popup_window.winfo_exists():
+        # Store current answer text and position before destroying
+        try:
+            # Find the text widget to get current content
+            answer_text = getattr(popup_window, '_answer_text', None)
+            if answer_text:
+                show_answer_popup(answer_text)
+        except Exception:
+            pass
+
+
 # Main Execution
 if __name__ == "__main__":
     model = configure_genai()
@@ -583,9 +687,12 @@ if __name__ == "__main__":
         print(f"  1. Open your document/quiz/code on screen")
         print(f"  2. Press [{HOTKEY}] to get AI answer")
         print(f"  3. Press [{HIDE_HOTKEY}] to hide/unhide popup")
-        print(f"  4. Press [{QUIT_HOTKEY}] to quit")
-        print(f"  5. Or close this window to quit\n")
-        print("⚡ Status: Ready and waiting...\n")
+        print(f"  4. Press [{THEME_HOTKEY}] to toggle dark/light theme")
+        print(f"  5. Press [{QUIT_HOTKEY}] to quit")
+        print(f"  6. Or close this window to quit\n")
+        current_theme = app_config.get('theme', 'light')
+        theme_icon = "🌙" if current_theme == "dark" else "☀️"
+        print(f"⚡ Status: Ready and waiting... (Theme: {current_theme} {theme_icon})\n")
         
         # Create hidden root window for tkinter
         root = tk.Tk()
@@ -594,6 +701,7 @@ if __name__ == "__main__":
         # Add the hotkey listeners
         keyboard.add_hotkey(HOTKEY, analyze_screen)
         keyboard.add_hotkey(HIDE_HOTKEY, toggle_popup_visibility)
+        keyboard.add_hotkey(THEME_HOTKEY, toggle_theme)
         keyboard.add_hotkey(QUIT_HOTKEY, quit_application)
         
         # Suppress Ctrl+C in terminal by blocking keyboard module from capturing it

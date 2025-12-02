@@ -23,12 +23,15 @@
 - 🤖 **AI-Powered Analysis** - Uses Google Gemini 2.5 Flash to analyze and solve problems
 - 📋 **Smart Formatting** - Answers are organized with Question, Answer, and Explanation sections
 - 🎨 **Modern UI** - Clean, professional popup with rounded corners and smooth animations
+- 🌙 **Dark/Light Theme** - Toggle between dark and light modes with a hotkey
+- 📍 **Position Memory** - Popup remembers where you last placed it
 - 👻 **Stealth Mode** - Window is undetectable by other apps (no taskbar, no Alt+Tab)
 - 📌 **Always on Top** - Answer popup stays visible above all windows
 - 📝 **One-Click Copy** - Copy the entire answer to clipboard instantly
 - ⌨️ **Keyboard Shortcuts** - Full hotkey support for quick access
 - ⚡ **Loading Indicator** - Small blinking logo at bottom-left shows when AI is processing
 - 👁️ **Quick Hide/Unhide** - Instantly toggle visibility of all UI elements with a hotkey
+- 💾 **Persistent Settings** - Your preferences are saved automatically
 
 ## 🖼️ Screenshot
 
@@ -91,6 +94,7 @@
 |----------|--------|
 | `Ctrl + Alt + S` | Capture screen and get AI answer |
 | `Ctrl + Alt + I` | Hide/Unhide UI (popup & loading indicator) |
+| `Ctrl + Alt + T` | Toggle dark/light theme |
 | `Ctrl + Alt + Q` | Quit the application |
 | `ESC` | Close the answer popup |
 
@@ -115,13 +119,24 @@ QUIT_HOTKEY = "ctrl+alt+q"
 
 # The Hotkey combination to hide/unhide the popup
 HIDE_HOTKEY = "ctrl+alt+i"
+
+# The Hotkey combination to toggle theme (dark/light)
+THEME_HOTKEY = "ctrl+alt+t"
 ```
+
+### Persistent Settings
+
+ElAnswer automatically saves your preferences to `config.json`:
+
+- **Popup Position** - Drag the popup anywhere and it will remember the location
+- **Theme Preference** - Your dark/light mode choice is saved automatically
 
 ## 📁 Project Structure
 
 ```
 elanswer/
 ├── main.py          # Main application file
+├── config.json      # User preferences (auto-generated)
 ├── README.md        # This file
 ├── requirements.txt # Python dependencies
 ├── LICENSE          # MIT License
