@@ -20,16 +20,19 @@
 ## ✨ Features
 
 - 🖥️ **Instant Screen Capture** - Press a hotkey to capture your entire screen
-- 🤖 **AI-Powered Analysis** - Uses Google Gemini 2.5 Flash to analyze and solve problems
+- 🤖 **AI-Powered Analysis** - Uses Google Gemini to analyze and solve problems
+- 🎯 **Model Selection** - Choose from all available Gemini models via Settings
 - 📋 **Smart Formatting** - Answers are organized with Question, Answer, and Explanation sections
 - 🎨 **Modern UI** - Clean, professional popup with rounded corners and smooth animations
 - 🌙 **Dark/Light Theme** - Toggle between dark and light modes with a hotkey
+- ⚙️ **Settings Panel** - Configure model, theme, auto-copy, and more
 - 📍 **Position Memory** - Popup remembers where you last placed it
 - 📚 **History** - Access your recent captures and answers anytime
 - 📥 **System Tray** - Runs minimized in system tray, no console window
 - 👻 **Stealth Mode** - Window is undetectable by other apps (no taskbar, no Alt+Tab)
 - 📌 **Always on Top** - Answer popup stays visible above all windows
 - 📝 **One-Click Copy** - Copy the entire answer to clipboard instantly
+- 📋 **Auto-Copy** - Optionally auto-copy answers to clipboard
 - ⌨️ **Keyboard Shortcuts** - Full hotkey support for quick access
 - ⚡ **Loading Indicator** - Small blinking logo at bottom-left shows when AI is processing
 - 👁️ **Quick Hide/Unhide** - Instantly toggle visibility of all UI elements with a hotkey
@@ -57,6 +60,14 @@
 └─────────────────────────────────────┘
 ```
 
+<p align="center">
+  <img src="assets/s1.png" alt="ElAnswer screenshot light" width="420">
+</p>
+
+<p align="center">
+  <img src="assets/s2.png" alt="ElAnswer screenshot dark" width="420">
+</p>
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -78,17 +89,19 @@
    pip install google-generativeai keyboard pillow pystray
    ```
 
-3. **Configure your API key**
-   
-   Open `main.py` and replace the API key:
-   ```python
-   API_KEY = "your-gemini-api-key-here"
-   ```
-
-4. **Run the application**
+3. **Run the application**
    ```bash
    python main.py
    ```
+
+4. **Configure your API key**
+   
+   On first run, the Settings panel will open automatically. Enter your Gemini API key:
+   - Get your key from [Google AI Studio](https://makersuite.google.com/app/apikey)
+   - Paste it in the "API Key" field
+   - Click "Save Settings"
+   
+   Your API key is stored locally in `config.json` and never shared.
 
 ## ⌨️ Keyboard Shortcuts
 
@@ -96,6 +109,7 @@
 |----------|--------|
 | `Ctrl + Alt + S` | Capture screen and get AI answer |
 | `Ctrl + Alt + H` | View answer history |
+| `Ctrl + Alt + P` | Open settings panel |
 | `Ctrl + Alt + I` | Hide/Unhide UI (popup & loading indicator) |
 | `Ctrl + Alt + T` | Toggle dark/light theme |
 | `Ctrl + Alt + Q` | Quit the application |
@@ -110,6 +124,7 @@ ElAnswer runs minimized in your system tray (notification area). Right-click the
 - **View History** - Open the full history popup
 - **Dark Mode** - Toggle between dark and light themes
 - **Hide/Show UI** - Toggle visibility of popup windows
+- **Settings** - Open the settings panel
 - **Quit** - Exit the application
 
 ## 🎯 Use Cases
@@ -140,6 +155,9 @@ THEME_HOTKEY = "ctrl+alt+t"
 # The Hotkey combination to show history
 HISTORY_HOTKEY = "ctrl+alt+h"
 
+# The Hotkey combination to open settings
+SETTINGS_HOTKEY = "ctrl+alt+p"
+
 # Maximum number of history items to keep
 MAX_HISTORY_ITEMS = 10
 ```
@@ -148,8 +166,22 @@ MAX_HISTORY_ITEMS = 10
 
 ElAnswer automatically saves your preferences to `config.json`:
 
+- **AI Model** - Your selected Gemini model
 - **Popup Position** - Drag the popup anywhere and it will remember the location
 - **Theme Preference** - Your dark/light mode choice is saved automatically
+- **Auto-Copy** - Option to automatically copy answers to clipboard
+- **Show Explanations** - Toggle detailed explanations in answers
+- **Compact Mode** - Use smaller popup windows
+- **History Limit** - Configure maximum number of history items
+
+### Settings Panel
+
+Open Settings with `Ctrl + Alt + ,` or from the system tray to configure:
+
+- **AI Model** - Select from all available Gemini models (fetched from API)
+- **Appearance** - Switch between Light and Dark themes
+- **Options** - Toggle auto-copy, explanations, and compact mode
+- **History Limit** - Set how many recent answers to keep (5-50)
 
 ### Answer History
 
