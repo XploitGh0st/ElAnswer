@@ -8,13 +8,27 @@ google-generativeai>=0.3.0
 Pillow>=10.0.0
 
 # Global keyboard hotkeys
+# Note: On Linux, may require root or input group membership
 keyboard>=0.13.5
 
-# System tray icon
+# System tray icon (cross-platform)
 pystray>=0.19.0
 
 # Build tools (for creating executable)
 pyinstaller>=6.0.0
 
-# Optional: For better Windows icon support
+# === Platform-Specific Dependencies ===
+
+# Windows: For better icon support and window handling
 pywin32>=306; sys_platform == 'win32'
+
+# Linux: For screenshot capture (fallback if ImageGrab fails)
+pyscreenshot>=3.0; sys_platform == 'linux'
+
+# Linux: For system tray (pystray backend)
+# You may need to install system packages:
+#   Ubuntu/Debian: sudo apt install python3-tk libappindicator3-1 gir1.2-appindicator3-0.1
+#   Fedora: sudo dnf install python3-tkinter libappindicator-gtk3
+
+# macOS: Pillow's ImageGrab works natively, but may need screen recording permission
+# Grant permission in: System Preferences > Security & Privacy > Privacy > Screen Recording

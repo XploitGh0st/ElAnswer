@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python">
-  <img src="https://img.shields.io/badge/Platform-Windows-lightgrey.svg" alt="Platform">
+  <img src="https://img.shields.io/badge/Platform-Windows%20|%20Linux%20|%20macOS-lightgrey.svg" alt="Platform">
   <img src="https://img.shields.io/badge/AI-Google%20Gemini-orange.svg" alt="AI">
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
 </p>
@@ -73,8 +73,22 @@
 ### Prerequisites
 
 - Python 3.10 or higher
-- Windows 10/11
+- Windows 10/11, Linux (Ubuntu 18.04+), or macOS (10.14+)
 - Google Gemini API Key ([Get one here](https://makersuite.google.com/app/apikey))
+
+#### Platform-Specific Requirements
+
+**Linux:**
+```bash
+# Install required system packages
+sudo apt-get install python3-tk python3-dev scrot xdotool
+
+# Note: Running as root may be required for global hotkeys
+```
+
+**macOS:**
+- Grant permissions for Screen Recording and Accessibility in System Preferences
+- Install tkinter via Homebrew if needed: `brew install python-tk`
 
 ### Installation
 
@@ -86,7 +100,16 @@
 
 2. **Install dependencies**
    ```bash
+   pip install -r requirements.txt
+   ```
+   
+   Or install manually:
+   ```bash
+   # All platforms
    pip install google-generativeai keyboard pillow pystray
+   
+   # Linux only (for screenshots)
+   pip install pyscreenshot
    ```
 
 3. **Run the application**
@@ -202,9 +225,55 @@ elanswer/
 ├── README.md        # This file
 ├── requirements.txt # Python dependencies
 ├── LICENSE          # MIT License
+├── build.ps1        # Windows build script (PowerShell)
+├── build.bat        # Windows build script (Batch)
+├── build_linux.sh   # Linux build script
+├── build_macos.sh   # macOS build script
+├── ElAnswer.spec    # PyInstaller configuration
 └── assets/
-    └── logo.png     # Application logo
+    ├── logo.png     # Application logo
+    └── logo.ico     # Windows icon
 ```
+
+## 🔨 Building Executables
+
+### Windows
+
+```powershell
+# Using PowerShell script
+.\build.ps1
+
+# Or using batch script
+.\build.bat
+```
+
+The executable will be created at `dist/ElAnswer.exe`.
+
+### Linux
+
+```bash
+# Make the script executable and run
+chmod +x build_linux.sh
+./build_linux.sh
+```
+
+The executable will be created at `dist/ElAnswer`.
+
+**Note:** On Linux, the `keyboard` library requires root privileges for global hotkeys. Run with `sudo` if needed.
+
+### macOS
+
+```bash
+# Make the script executable and run
+chmod +x build_macos.sh
+./build_macos.sh
+```
+
+The application bundle will be created at `dist/ElAnswer.app`.
+
+**Important macOS Permissions:**
+- **Screen Recording**: System Preferences → Security & Privacy → Privacy → Screen Recording
+- **Accessibility**: System Preferences → Security & Privacy → Privacy → Accessibility
 
 ## 🔒 Privacy & Security
 

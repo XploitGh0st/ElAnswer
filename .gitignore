@@ -49,3 +49,5 @@ version_info.txt
 ElAnswer.spec
 elanswer.log
 create_icon.py
+build_macos.sh
+build_linux.sh

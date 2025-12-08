@@ -32,15 +32,127 @@ import os
 import sys
 import json
 import logging
+import platform
+import subprocess
+import webbrowser
 from datetime import datetime
 import keyboard  # For detecting key presses
 import google.generativeai as genai
-from PIL import ImageGrab, Image, ImageTk  # For taking screenshots and image handling
+from PIL import Image, ImageTk  # For image handling
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
 import threading
-import ctypes
 import pystray  # For system tray icon
+
+# Platform detection
+IS_WINDOWS = sys.platform == 'win32'
+IS_MACOS = sys.platform == 'darwin'
+IS_LINUX = sys.platform.startswith('linux')
+
+# Import platform-specific modules
+if IS_WINDOWS:
+    import ctypes
+else:
+    ctypes = None
+
+# Cross-platform screenshot capture
+def capture_screenshot():
+    """Capture screenshot in a cross-platform manner."""
+    try:
+        # Try PIL ImageGrab first (works on Windows and macOS)
+        from PIL import ImageGrab
+        return ImageGrab.grab()
+    except Exception as e:
+        logger.warning(f"ImageGrab failed: {e}")
+        # Fallback for Linux - try pyscreenshot
+        try:
+            import pyscreenshot as ImageGrab
+            return ImageGrab.grab()
+        except ImportError:
+            logger.error("pyscreenshot not installed. Install with: pip install pyscreenshot")
+            return None
+        except Exception as e2:
+            logger.error(f"Screenshot capture failed: {e2}")
+            return None
+
+# Cross-platform URL opener
+def open_url(url):
+    """Open URL in default browser (cross-platform)."""
+    try:
+        webbrowser.open(url)
+    except Exception as e:
+        logger.error(f"Failed to open URL: {e}")
+
+# Cross-platform window styling helper
+def apply_window_style(window, style='tool'):
+    """
+    Apply platform-specific window styling.
+    style: 'tool' (no taskbar), 'popup' (no taskbar, no activate)
+    """
+    try:
+        if IS_WINDOWS and ctypes:
+            window.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+            GWL_EXSTYLE = -20
+            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_NOACTIVATE = 0x08000000
+            
+            if style == 'tool':
+                ex_style = ex_style | WS_EX_TOOLWINDOW
+            elif style == 'popup':
+                ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+            
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+        elif IS_MACOS:
+            # macOS-specific styling (limited options with tkinter)
+            pass
+        else:
+            # Linux - try to set window type hint via wm attributes
+            try:
+                window.attributes('-type', 'utility')
+            except tk.TclError:
+                pass
+    except Exception as e:
+        logger.debug(f"Could not apply window style: {e}")
+
+# Cross-platform transparent color support
+def apply_transparency(window, bg_color='#000000'):
+    """
+    Apply transparency for rounded corners (platform-specific).
+    Returns True if transparency is supported.
+    """
+    try:
+        if IS_WINDOWS:
+            window.configure(bg=bg_color)
+            window.wm_attributes('-transparentcolor', bg_color)
+            return True
+        elif IS_MACOS:
+            # macOS doesn't support transparentcolor the same way
+            # Use a solid background instead
+            window.configure(bg=bg_color)
+            return False
+        else:
+            # Linux - transparency support varies by compositor
+            try:
+                window.configure(bg=bg_color)
+                window.wm_attributes('-transparentcolor', bg_color)
+                return True
+            except tk.TclError:
+                window.configure(bg=bg_color)
+                return False
+    except Exception:
+        return False
+
+# Cross-platform font helper
+def get_system_font():
+    """Get the appropriate system font for the platform."""
+    if IS_WINDOWS:
+        return 'Segoe UI'
+    elif IS_MACOS:
+        return 'SF Pro Display'
+    else:
+        return 'DejaVu Sans'
 
 # Application version
 APP_VERSION = "1.2.0"
@@ -108,14 +220,15 @@ def setup_logging():
 # Initialize logging
 logger = setup_logging()
 
-# Enable High DPI awareness for crisp rendering
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
-except:
+# Enable High DPI awareness (Windows only)
+if IS_WINDOWS and ctypes:
     try:
-        ctypes.windll.user32.SetProcessDPIAware()  # Fallback for older Windows
-    except:
-        pass
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()  # Fallback for older Windows
+        except Exception:
+            pass
 
 # ---------------- CONFIGURATION ---------------- #
 
@@ -408,19 +521,11 @@ def show_loading_indicator():
     loading_indicator.attributes('-topmost', True)
     loading_indicator.attributes('-alpha', 0.95)
     
-    # Make window undetectable (tool window style)
-    loading_indicator.update_idletasks()
-    hwnd = ctypes.windll.user32.GetParent(loading_indicator.winfo_id())
-    GWL_EXSTYLE = -20
-    ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    WS_EX_TOOLWINDOW = 0x00000080
-    WS_EX_NOACTIVATE = 0x08000000
-    ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-    ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+    # Make window undetectable (tool window style) - cross-platform
+    apply_window_style(loading_indicator, 'popup')
     
-    # Transparent background
-    loading_indicator.configure(bg='#000000')
-    loading_indicator.wm_attributes('-transparentcolor', '#000000')
+    # Transparent background - cross-platform
+    apply_transparency(loading_indicator, '#000000')
     
     # Load and resize logo
     try:
@@ -452,7 +557,7 @@ def show_loading_indicator():
         fallback_label = tk.Label(
             loading_indicator,
             text="⚡",
-            font=('Segoe UI', 24),
+            font=(get_system_font(), 24),
             bg='#1a1a1a',
             fg='#fbbf24'
         )
@@ -517,15 +622,8 @@ def show_answer_popup(answer_text):
     # Prevent window from stealing focus
     popup_window.focus_set = lambda: None
     
-    # Make window undetectable
-    popup_window.update_idletasks()
-    hwnd = ctypes.windll.user32.GetParent(popup_window.winfo_id())
-    GWL_EXSTYLE = -20
-    ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    WS_EX_TOOLWINDOW = 0x00000080
-    WS_EX_NOACTIVATE = 0x08000000
-    ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-    ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+    # Make window undetectable - cross-platform
+    apply_window_style(popup_window, 'popup')
     
     # Get colors from current theme
     card_bg = theme['card_bg']
@@ -536,9 +634,8 @@ def show_answer_popup(answer_text):
     green_accent = theme['green_accent']
     light_gray = theme['light_gray']
     
-    # Make window transparent for rounded corners
-    popup_window.configure(bg='#000000')
-    popup_window.wm_attributes('-transparentcolor', '#000000')
+    # Make window transparent for rounded corners - cross-platform
+    apply_transparency(popup_window, '#000000')
     
     # Main canvas for rounded corners
     canvas = tk.Canvas(popup_window, width=480, height=520, bg='#000000', highlightthickness=0)
@@ -569,7 +666,7 @@ def show_answer_popup(answer_text):
     close_btn = tk.Label(
         top_bar,
         text="×",
-        font=('Segoe UI', 22),
+        font=(get_system_font(), 22),
         bg=card_bg,
         fg='#9ca3af',
         cursor='hand2'
@@ -595,7 +692,7 @@ def show_answer_popup(answer_text):
     icon_label = tk.Label(
         title_row,
         text="⚡",
-        font=('Segoe UI', 16),
+        font=(get_system_font(), 16),
         bg=card_bg,
         fg=text_color
     )
@@ -604,7 +701,7 @@ def show_answer_popup(answer_text):
     title_label = tk.Label(
         title_row,
         text="ElAnswer",
-        font=('Segoe UI', 15, 'bold'),
+        font=(get_system_font(), 15, 'bold'),
         bg=card_bg,
         fg=text_color
     )
@@ -614,7 +711,7 @@ def show_answer_popup(answer_text):
     subtitle_label = tk.Label(
         header_section,
         text="AI-powered answer to your screen capture",
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=card_bg,
         fg=secondary_text
     )
@@ -635,7 +732,7 @@ def show_answer_popup(answer_text):
     text_area = scrolledtext.ScrolledText(
         answer_inner,
         wrap=tk.WORD,
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=light_gray,
         fg=text_color,
         relief=tk.FLAT,
@@ -671,7 +768,7 @@ def show_answer_popup(answer_text):
     status_text = tk.Label(
         status_frame,
         text="Response generated successfully",
-        font=('Segoe UI', 9),
+        font=(get_system_font(), 9),
         bg=card_bg,
         fg=secondary_text
     )
@@ -692,7 +789,7 @@ def show_answer_popup(answer_text):
         buttons_frame,
         text="Copy",
         command=copy_to_clipboard,
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=accent_color,
         fg='white',
         relief=tk.FLAT,
@@ -712,7 +809,7 @@ def show_answer_popup(answer_text):
         buttons_frame,
         text="Close",
         command=lambda: fade_out_window(),
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=card_bg,
         fg=text_color,
         relief=tk.SOLID,
@@ -731,7 +828,7 @@ def show_answer_popup(answer_text):
     hint_label = tk.Label(
         buttons_frame,
         text="ESC to close",
-        font=('Segoe UI', 9),
+        font=(get_system_font(), 9),
         bg=card_bg,
         fg='#9ca3af'
     )
@@ -828,8 +925,11 @@ def analyze_screen():
     
     def process_and_display():
         try:
-            # 1. Capture the entire screen
-            screenshot = ImageGrab.grab()
+            # 1. Capture the entire screen using cross-platform function
+            screenshot = capture_screenshot()
+            
+            if screenshot is None:
+                raise Exception("Failed to capture screenshot")
             
             # 2. visual feedback
             logger.debug("Screen captured. Sending to Gemini...")
@@ -971,15 +1071,8 @@ def show_history_popup():
     popup_window.attributes('-topmost', True)
     popup_window.attributes('-alpha', 0.0)
     
-    # Make window undetectable
-    popup_window.update_idletasks()
-    hwnd = ctypes.windll.user32.GetParent(popup_window.winfo_id())
-    GWL_EXSTYLE = -20
-    ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    WS_EX_TOOLWINDOW = 0x00000080
-    WS_EX_NOACTIVATE = 0x08000000
-    ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-    ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+    # Make window undetectable - cross-platform
+    apply_window_style(popup_window, 'popup')
     
     # Get colors from current theme
     card_bg = theme['card_bg']
@@ -989,9 +1082,8 @@ def show_history_popup():
     accent_color = theme['accent_color']
     light_gray = theme['light_gray']
     
-    # Make window transparent for rounded corners
-    popup_window.configure(bg='#000000')
-    popup_window.wm_attributes('-transparentcolor', '#000000')
+    # Make window transparent for rounded corners - cross-platform
+    apply_transparency(popup_window, '#000000')
     
     # Main canvas for rounded corners
     canvas = tk.Canvas(popup_window, width=400, height=450, bg='#000000', highlightthickness=0)
@@ -1021,7 +1113,7 @@ def show_history_popup():
     close_btn = tk.Label(
         top_bar,
         text="×",
-        font=('Segoe UI', 22),
+        font=(get_system_font(), 22),
         bg=card_bg,
         fg=theme['close_btn_fg'],
         cursor='hand2'
@@ -1042,13 +1134,13 @@ def show_history_popup():
     title_row = tk.Frame(header_section, bg=card_bg)
     title_row.pack(fill=tk.X)
     
-    icon_label = tk.Label(title_row, text="📚", font=('Segoe UI', 14), bg=card_bg, fg=text_color)
+    icon_label = tk.Label(title_row, text="📚", font=(get_system_font(), 14), bg=card_bg, fg=text_color)
     icon_label.pack(side=tk.LEFT, padx=(0, 8))
     
-    title_label = tk.Label(title_row, text="Recent Answers", font=('Segoe UI', 14, 'bold'), bg=card_bg, fg=text_color)
+    title_label = tk.Label(title_row, text="Recent Answers", font=(get_system_font(), 14, 'bold'), bg=card_bg, fg=text_color)
     title_label.pack(side=tk.LEFT)
     
-    count_label = tk.Label(title_row, text=f"({len(answer_history)})", font=('Segoe UI', 10), bg=card_bg, fg=secondary_text)
+    count_label = tk.Label(title_row, text=f"({len(answer_history)})", font=(get_system_font(), 10), bg=card_bg, fg=secondary_text)
     count_label.pack(side=tk.LEFT, padx=(8, 0))
     
     # Scrollable list container
@@ -1089,7 +1181,7 @@ def show_history_popup():
         time_label = tk.Label(
             inner_frame,
             text=entry['timestamp'],
-            font=('Segoe UI', 8),
+            font=(get_system_font(), 8),
             bg=light_gray,
             fg=secondary_text
         )
@@ -1099,7 +1191,7 @@ def show_history_popup():
         preview_label = tk.Label(
             inner_frame,
             text=entry['preview'],
-            font=('Segoe UI', 10),
+            font=(get_system_font(), 10),
             bg=light_gray,
             fg=text_color,
             anchor='w',
@@ -1133,7 +1225,7 @@ def show_history_popup():
         footer,
         text="Clear History",
         command=clear_history,
-        font=('Segoe UI', 9),
+        font=(get_system_font(), 9),
         bg=card_bg,
         fg=secondary_text,
         relief=tk.SOLID,
@@ -1144,7 +1236,7 @@ def show_history_popup():
     )
     clear_btn.pack(side=tk.LEFT)
     
-    hint_label = tk.Label(footer, text="Click to view", font=('Segoe UI', 9), bg=card_bg, fg='#9ca3af')
+    hint_label = tk.Label(footer, text="Click to view", font=(get_system_font(), 9), bg=card_bg, fg='#9ca3af')
     hint_label.pack(side=tk.RIGHT)
     
     # Animations
@@ -1229,14 +1321,8 @@ def show_settings_popup():
     settings_window.attributes('-topmost', True)
     settings_window.attributes('-alpha', 0.0)
     
-    # Make window tool-style (no taskbar), but allow focus for input
-    settings_window.update_idletasks()
-    hwnd = ctypes.windll.user32.GetParent(settings_window.winfo_id())
-    GWL_EXSTYLE = -20
-    ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    WS_EX_TOOLWINDOW = 0x00000080
-    ex_style = ex_style | WS_EX_TOOLWINDOW
-    ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+    # Make window tool-style (no taskbar), but allow focus for input - cross-platform
+    apply_window_style(settings_window, 'tool')
     
     # Get colors from current theme
     card_bg = theme['card_bg']
@@ -1250,9 +1336,8 @@ def show_settings_popup():
     # Widgets that participate in theme updates
     themed_widgets = []
     
-    # Make window transparent for rounded corners
-    settings_window.configure(bg='#000000')
-    settings_window.wm_attributes('-transparentcolor', '#000000')
+    # Make window transparent for rounded corners - cross-platform
+    apply_transparency(settings_window, '#000000')
     
     # Main canvas for rounded corners
     canvas = tk.Canvas(settings_window, width=450, height=550, bg='#000000', highlightthickness=0)
@@ -1282,7 +1367,7 @@ def show_settings_popup():
     close_btn = tk.Label(
         top_bar,
         text="×",
-        font=('Segoe UI', 22),
+        font=(get_system_font(), 22),
         bg=card_bg,
         fg=theme['close_btn_fg'],
         cursor='hand2'
@@ -1303,10 +1388,10 @@ def show_settings_popup():
     title_row = tk.Frame(header_section, bg=card_bg)
     title_row.pack(fill=tk.X)
     
-    icon_label = tk.Label(title_row, text="⚙️", font=('Segoe UI', 16), bg=card_bg, fg=text_color)
+    icon_label = tk.Label(title_row, text="⚙️", font=(get_system_font(), 16), bg=card_bg, fg=text_color)
     icon_label.pack(side=tk.LEFT, padx=(0, 10))
     
-    title_label = tk.Label(title_row, text="Settings", font=('Segoe UI', 16, 'bold'), bg=card_bg, fg=text_color)
+    title_label = tk.Label(title_row, text="Settings", font=(get_system_font(), 16, 'bold'), bg=card_bg, fg=text_color)
     title_label.pack(side=tk.LEFT)
     
     # Scrollable content container
@@ -1344,16 +1429,16 @@ def show_settings_popup():
     api_header = tk.Frame(api_section, bg=card_bg)
     api_header.pack(fill=tk.X)
     
-    api_icon = tk.Label(api_header, text="🔑", font=('Segoe UI', 12), bg=card_bg, fg=text_color)
+    api_icon = tk.Label(api_header, text="🔑", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
     api_icon.pack(side=tk.LEFT)
     
-    api_title = tk.Label(api_header, text="API Key", font=('Segoe UI', 11, 'bold'), bg=card_bg, fg=text_color)
+    api_title = tk.Label(api_header, text="API Key", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
     api_title.pack(side=tk.LEFT, padx=(6, 0))
     
     api_desc = tk.Label(
         api_section,
         text="Enter your Google Gemini API key",
-        font=('Segoe UI', 9),
+        font=(get_system_font(), 9),
         bg=card_bg,
         fg=secondary_text
     )
@@ -1374,7 +1459,7 @@ def show_settings_popup():
     api_entry = tk.Entry(
         api_input_inner,
         textvariable=api_key_var,
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=light_gray,
         fg=text_color,
         relief=tk.FLAT,
@@ -1396,7 +1481,7 @@ def show_settings_popup():
     show_key_btn = tk.Label(
         api_header,
         text="👁",
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=card_bg,
         fg=secondary_text,
         cursor='hand2'
@@ -1410,13 +1495,13 @@ def show_settings_popup():
     api_link = tk.Label(
         api_section,
         text="Get your API key from Google AI Studio →",
-        font=('Segoe UI', 9, 'underline'),
+        font=(get_system_font(), 9, 'underline'),
         bg=card_bg,
         fg=accent_color,
         cursor='hand2'
     )
     api_link.pack(anchor='w', pady=(4, 0))
-    api_link.bind('<Button-1>', lambda e: os.startfile("https://makersuite.google.com/app/apikey"))
+    api_link.bind('<Button-1>', lambda e: open_url("https://makersuite.google.com/app/apikey"))
     
     # Status indicator
     api_status_frame = tk.Frame(api_section, bg=card_bg)
@@ -1426,7 +1511,7 @@ def show_settings_popup():
         api_status = tk.Label(
             api_status_frame,
             text="✓ API key configured",
-            font=('Segoe UI', 9),
+            font=(get_system_font(), 9),
             bg=card_bg,
             fg=green_accent
         )
@@ -1434,7 +1519,7 @@ def show_settings_popup():
         api_status = tk.Label(
             api_status_frame,
             text="⚠ No API key set",
-            font=('Segoe UI', 9),
+            font=(get_system_font(), 9),
             bg=card_bg,
             fg='#f59e0b'
         )
@@ -1458,7 +1543,7 @@ def show_settings_popup():
         api_section,
         text="Save API Key",
         command=save_api_key,
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=accent_color,
         fg='white',
         relief=tk.FLAT,
@@ -1492,16 +1577,16 @@ def show_settings_popup():
     model_header = tk.Frame(model_section, bg=card_bg)
     model_header.pack(fill=tk.X)
     
-    model_icon = tk.Label(model_header, text="🤖", font=('Segoe UI', 12), bg=card_bg, fg=text_color)
+    model_icon = tk.Label(model_header, text="🤖", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
     model_icon.pack(side=tk.LEFT)
     
-    model_title = tk.Label(model_header, text="AI Model", font=('Segoe UI', 11, 'bold'), bg=card_bg, fg=text_color)
+    model_title = tk.Label(model_header, text="AI Model", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
     model_title.pack(side=tk.LEFT, padx=(6, 0))
     
     model_desc = tk.Label(
         model_section,
         text="Select the Gemini model to use for analysis",
-        font=('Segoe UI', 9),
+        font=(get_system_font(), 9),
         bg=card_bg,
         fg=secondary_text
     )
@@ -1533,7 +1618,7 @@ def show_settings_popup():
     model_display = tk.Label(
         model_listbox_frame,
         textvariable=current_model_var,
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=light_gray,
         fg=text_color,
         anchor='w',
@@ -1547,7 +1632,7 @@ def show_settings_popup():
     arrow_label = tk.Label(
         model_listbox_frame,
         text="▼",
-        font=('Segoe UI', 8),
+        font=(get_system_font(), 8),
         bg=light_gray,
         fg=secondary_text
     )
@@ -1557,7 +1642,7 @@ def show_settings_popup():
     dropdown_list_frame = tk.Frame(model_section, bg=border_color)
     dropdown_listbox = tk.Listbox(
         dropdown_list_frame,
-        font=('Segoe UI', 9),
+        font=(get_system_font(), 9),
         bg=light_gray,
         fg=text_color,
         selectbackground=accent_color,
@@ -1598,7 +1683,7 @@ def show_settings_popup():
     refresh_btn = tk.Label(
         model_header,
         text="🔄",
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=card_bg,
         fg=secondary_text,
         cursor='hand2'
@@ -1644,7 +1729,7 @@ def show_settings_popup():
     model_status = tk.Label(
         model_section,
         text="",
-        font=('Segoe UI', 9),
+        font=(get_system_font(), 9),
         bg=card_bg,
         fg=secondary_text,
         anchor='w'
@@ -1655,7 +1740,7 @@ def show_settings_popup():
         model_section,
         text="Set Model",
         command=apply_model,
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=accent_color,
         fg='white',
         relief=tk.FLAT,
@@ -1675,10 +1760,10 @@ def show_settings_popup():
     theme_header = tk.Frame(theme_section, bg=card_bg)
     theme_header.pack(fill=tk.X)
     
-    theme_icon_lbl = tk.Label(theme_header, text="🎨", font=('Segoe UI', 12), bg=card_bg, fg=text_color)
+    theme_icon_lbl = tk.Label(theme_header, text="🎨", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
     theme_icon_lbl.pack(side=tk.LEFT)
     
-    theme_title = tk.Label(theme_header, text="Appearance", font=('Segoe UI', 11, 'bold'), bg=card_bg, fg=text_color)
+    theme_title = tk.Label(theme_header, text="Appearance", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
     theme_title.pack(side=tk.LEFT, padx=(6, 0))
     
     theme_options = tk.Frame(theme_section, bg=card_bg)
@@ -1757,10 +1842,10 @@ def show_settings_popup():
         btn_content = tk.Frame(btn_inner, bg=light_gray)
         btn_content.pack(padx=16, pady=10)
         
-        btn_icon = tk.Label(btn_content, text=icon, font=('Segoe UI', 14), bg=light_gray, fg=text_color)
+        btn_icon = tk.Label(btn_content, text=icon, font=(get_system_font(), 14), bg=light_gray, fg=text_color)
         btn_icon.pack()
         
-        btn_text = tk.Label(btn_content, text=text, font=('Segoe UI', 9), bg=light_gray, fg=text_color)
+        btn_text = tk.Label(btn_content, text=text, font=(get_system_font(), 9), bg=light_gray, fg=text_color)
         btn_text.pack()
         
         # Store widgets for theme updates
@@ -1824,10 +1909,10 @@ def show_settings_popup():
     options_header = tk.Frame(options_section, bg=card_bg)
     options_header.pack(fill=tk.X)
     
-    options_icon = tk.Label(options_header, text="⚡", font=('Segoe UI', 12), bg=card_bg, fg=text_color)
+    options_icon = tk.Label(options_header, text="⚡", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
     options_icon.pack(side=tk.LEFT)
     
-    options_title = tk.Label(options_header, text="Options", font=('Segoe UI', 11, 'bold'), bg=card_bg, fg=text_color)
+    options_title = tk.Label(options_header, text="Options", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
     options_title.pack(side=tk.LEFT, padx=(6, 0))
     
     # Checkboxes
@@ -1850,7 +1935,7 @@ def show_settings_popup():
         cb_inner = tk.Frame(cb_box, bg=light_gray)
         cb_inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
         
-        cb_check = tk.Label(cb_inner, text="", font=('Segoe UI', 10), bg=light_gray, fg=accent_color)
+        cb_check = tk.Label(cb_inner, text="", font=(get_system_font(), 10), bg=light_gray, fg=accent_color)
         cb_check.pack(expand=True)
         
         def update_checkbox():
@@ -1870,13 +1955,13 @@ def show_settings_popup():
         for widget in [cb_box, cb_inner, cb_check]:
             widget.bind('<Button-1>', toggle_cb)
         
-        cb_label = tk.Label(cb_row, text=text, font=('Segoe UI', 10), bg=card_bg, fg=text_color, cursor='hand2')
+        cb_label = tk.Label(cb_row, text=text, font=(get_system_font(), 10), bg=card_bg, fg=text_color, cursor='hand2')
         cb_label.pack(side=tk.LEFT, padx=(10, 0))
         cb_label.bind('<Button-1>', toggle_cb)
         
         desc_label = None
         if description:
-            desc_label = tk.Label(cb_frame, text=description, font=('Segoe UI', 8), bg=card_bg, fg=secondary_text)
+            desc_label = tk.Label(cb_frame, text=description, font=(get_system_font(), 8), bg=card_bg, fg=secondary_text)
             desc_label.pack(anchor='w', padx=(30, 0))
         
         # Register widgets for theme updates
@@ -1911,10 +1996,10 @@ def show_settings_popup():
     history_header = tk.Frame(history_section, bg=card_bg)
     history_header.pack(fill=tk.X)
     
-    history_icon = tk.Label(history_header, text="📚", font=('Segoe UI', 12), bg=card_bg, fg=text_color)
+    history_icon = tk.Label(history_header, text="📚", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
     history_icon.pack(side=tk.LEFT)
     
-    history_title = tk.Label(history_header, text="History Limit", font=('Segoe UI', 11, 'bold'), bg=card_bg, fg=text_color)
+    history_title = tk.Label(history_header, text="History Limit", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
     history_title.pack(side=tk.LEFT, padx=(6, 0))
     
     history_row = tk.Frame(history_section, bg=card_bg)
@@ -1922,7 +2007,7 @@ def show_settings_popup():
     
     max_history_var = tk.IntVar(value=app_config.get("max_history", 10))
     
-    history_label = tk.Label(history_row, text="Maximum items:", font=('Segoe UI', 10), bg=card_bg, fg=text_color)
+    history_label = tk.Label(history_row, text="Maximum items:", font=(get_system_font(), 10), bg=card_bg, fg=text_color)
     history_label.pack(side=tk.LEFT)
     
     history_spinbox = tk.Spinbox(
@@ -1931,7 +2016,7 @@ def show_settings_popup():
         to=50,
         textvariable=max_history_var,
         width=5,
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=light_gray,
         fg=text_color,
         buttonbackground=light_gray,
@@ -1998,7 +2083,7 @@ def show_settings_popup():
         footer,
         text="Save Settings",
         command=save_settings,
-        font=('Segoe UI', 11),
+        font=(get_system_font(), 11),
         bg=accent_color,
         fg='white',
         relief=tk.FLAT,
@@ -2027,7 +2112,7 @@ def show_settings_popup():
         footer,
         text="Cancel",
         command=lambda: fade_out(),
-        font=('Segoe UI', 10),
+        font=(get_system_font(), 10),
         bg=card_bg,
         fg=text_color,
         relief=tk.SOLID,
@@ -2047,7 +2132,7 @@ def show_settings_popup():
     ])
     
     # ESC hint
-    hint_label = tk.Label(footer, text="ESC to close", font=('Segoe UI', 9), bg=card_bg, fg='#9ca3af')
+    hint_label = tk.Label(footer, text="ESC to close", font=(get_system_font(), 9), bg=card_bg, fg='#9ca3af')
     hint_label.pack(side=tk.RIGHT)
     
     # Register footer widgets
@@ -2210,10 +2295,10 @@ def run_tray_icon():
     icon.run()
 
 
-# Hide console window on Windows
+# Hide console window (Windows only, no-op on other platforms)
 def hide_console():
     """Hide the console window on Windows."""
-    if sys.platform == 'win32':
+    if IS_WINDOWS and ctypes:
         try:
             # Get the console window handle
             kernel32 = ctypes.WinDLL('kernel32')
@@ -2224,6 +2309,8 @@ def hide_console():
                 user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
         except Exception:
             pass
+    # On macOS and Linux, the console is handled differently
+    # (typically launched from terminal or as a background process)
 
 
 # Main Execution
