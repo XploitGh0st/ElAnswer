@@ -1003,14 +1003,32 @@ def auto_copy_answer(answer_text):
 
 def quit_application():
     """Gracefully quit the application."""
-    global tray_icon
-    
+    global tray_icon, root
+
     # Stop the tray icon if running
-    if tray_icon:
-        tray_icon.stop()
-    
-    root.quit()
-    root.destroy()
+    try:
+        if tray_icon:
+            tray_icon.stop()
+    except Exception as e:
+        logger.warning(f"Failed to stop tray icon cleanly: {e}")
+
+    # Safely close the Tk root if it still exists
+    if root:
+        try:
+            if root.winfo_exists():
+                try:
+                    root.quit()
+                except tk.TclError:
+                    pass
+                try:
+                    root.destroy()
+                except tk.TclError:
+                    pass
+        except tk.TclError:
+            pass
+        except Exception as e:
+            logger.warning(f"Error while closing root window: {e}")
+
     os._exit(0)
 
 def toggle_popup_visibility():
