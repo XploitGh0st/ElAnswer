@@ -31,15 +31,82 @@
 import os
 import sys
 import json
+import logging
 from datetime import datetime
 import keyboard  # For detecting key presses
 import google.generativeai as genai
 from PIL import ImageGrab, Image, ImageTk  # For taking screenshots and image handling
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, messagebox
 import threading
 import ctypes
 import pystray  # For system tray icon
+
+# Application version
+APP_VERSION = "1.2.0"
+APP_NAME = "ElAnswer"
+
+# Determine if running as frozen executable (PyInstaller)
+def is_frozen():
+    """Check if the application is running as a frozen executable."""
+    return getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
+
+# Get the correct base path for resources
+def get_resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller."""
+    if is_frozen():
+        # Running as compiled executable
+        base_path = sys._MEIPASS
+    else:
+        # Running as script
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, relative_path)
+
+# Get the correct path for user data (config, history)
+def get_data_path(filename):
+    """Get path for user data files (config, history) in app directory."""
+    if is_frozen():
+        # Store data next to the executable
+        base_path = os.path.dirname(sys.executable)
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, filename)
+
+# Setup logging
+def setup_logging():
+    """Configure logging for production use."""
+    log_file = get_data_path("elanswer.log")
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # File handler (rotates at 5MB)
+    try:
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setFormatter(formatter)
+        file_handler.setLevel(logging.INFO)
+    except Exception:
+        file_handler = None
+    
+    # Console handler (only if not frozen or debug mode)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(logging.DEBUG if not is_frozen() else logging.WARNING)
+    
+    # Configure root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+    if file_handler:
+        logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+# Initialize logging
+logger = setup_logging()
 
 # Enable High DPI awareness for crisp rendering
 try:
@@ -89,11 +156,10 @@ settings_window = None  # Settings window
 available_models = []  # Available Gemini models
 model = None  # Current Gemini model instance
 
-# Get the directory where the script is located
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGO_PATH = os.path.join(SCRIPT_DIR, "assets", "logo.png")
-CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
-HISTORY_PATH = os.path.join(SCRIPT_DIR, "history.json")
+# Get paths using the helper functions for proper executable support
+LOGO_PATH = get_resource_path(os.path.join("assets", "logo.png"))
+CONFIG_PATH = get_data_path("config.json")
+HISTORY_PATH = get_data_path("history.json")
 
 # History storage
 answer_history = []
@@ -134,7 +200,7 @@ def load_config():
         "popup_x": 200,
         "popup_y": 80,
         "theme": "light",
-        "model": "models/gemini-2.5-flash-preview-05-20",
+        "model": "models/gemini-2.5-flash",
         "max_history": 10,
         "auto_copy": False,
         "show_explanation": True,
@@ -147,7 +213,7 @@ def load_config():
                 # Merge with defaults to ensure all keys exist
                 return {**default_config, **config}
     except Exception as e:
-        print(f"[!] Could not load config: {e}")
+        logger.warning(f"Could not load config: {e}")
     return default_config
 
 def save_config(config):
@@ -156,7 +222,7 @@ def save_config(config):
         with open(CONFIG_PATH, 'w') as f:
             json.dump(config, f, indent=2)
     except Exception as e:
-        print(f"[!] Could not save config: {e}")
+        logger.error(f"Could not save config: {e}")
 
 def load_history():
     """Load answer history from file."""
@@ -168,7 +234,7 @@ def load_history():
                 # Trim to max items
                 answer_history = answer_history[:MAX_HISTORY_ITEMS]
     except Exception as e:
-        print(f"[!] Could not load history: {e}")
+        logger.warning(f"Could not load history: {e}")
         answer_history = []
 
 def save_history():
@@ -177,7 +243,7 @@ def save_history():
         with open(HISTORY_PATH, 'w', encoding='utf-8') as f:
             json.dump(answer_history[:MAX_HISTORY_ITEMS], f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"[!] Could not save history: {e}")
+        logger.error(f"Could not save history: {e}")
 
 def add_to_history(answer_text):
     """Add a new answer to history."""
@@ -245,7 +311,7 @@ def configure_genai():
     API_KEY = app_config.get("api_key", "") or os.environ.get("GEMINI_API_KEY", "")
     
     if not API_KEY or API_KEY == "YOUR_GEMINI_API_KEY_HERE":
-        print("[!] No API key configured. Please set it in Settings (Ctrl+Alt+P).")
+        logger.warning("No API key configured. Please set it in Settings (Ctrl+Alt+P).")
         return None
     
     try:
@@ -255,11 +321,11 @@ def configure_genai():
         threading.Thread(target=fetch_available_models, daemon=True).start()
         
         # Use saved model or default
-        selected_model = app_config.get("model", "models/gemini-2.5-flash-preview-05-20")
+        selected_model = app_config.get("model", "models/gemini-2.5-flash")
         model = genai.GenerativeModel(selected_model)
         return model
     except Exception as e:
-        print(f"[!] Failed to configure API: {e}")
+        logger.error(f"Failed to configure API: {e}")
         return None
 
 
@@ -291,10 +357,10 @@ def fetch_available_models():
             return (len(preferred_order), name)
         available_models.sort(key=sort_key)
     except Exception as e:
-        print(f"[!] Could not fetch models: {e}")
+        logger.warning(f"Could not fetch models: {e}")
         # Fallback models
         available_models = [
-            "models/gemini-2.5-flash-preview-05-20",
+            "models/gemini-2.5-flash",
             "models/gemini-2.5-pro-preview-05-06",
             "models/gemini-1.5-flash",
             "models/gemini-1.5-pro",
@@ -306,12 +372,12 @@ def fetch_available_models():
 def reload_model():
     """Reload the model with current settings."""
     global model
-    selected_model = app_config.get("model", "models/gemini-2.5-flash-preview-05-20")
+    selected_model = app_config.get("model", "models/gemini-2.5-flash")
     try:
         model = genai.GenerativeModel(selected_model)
-        print(f"[+] Model changed to: {selected_model}")
+        logger.info(f"Model changed to: {selected_model}")
     except Exception as e:
-        print(f"[!] Failed to load model: {e}")
+        logger.error(f"Failed to load model: {e}")
 
 def show_loading_indicator():
     """Shows a small blinking logo at the bottom left while Gemini is processing."""
@@ -382,7 +448,7 @@ def show_loading_indicator():
         
     except Exception as e:
         # Fallback to text if logo not found
-        print(f"[!] Could not load logo: {e}")
+        logger.debug(f"Could not load logo: {e}")
         fallback_label = tk.Label(
             loading_indicator,
             text="⚡",
@@ -740,22 +806,22 @@ def analyze_screen():
     
     # Check if API key is configured
     if not API_KEY:
-        print("[!] No API key configured. Opening settings...")
+        logger.warning("No API key configured. Opening settings...")
         root.after(0, show_settings_popup)
         return
     
     # Check if model is configured
-    selected_model = app_config.get("model", "models/gemini-2.5-flash-preview-05-20")
+    selected_model = app_config.get("model", "models/gemini-2.5-flash")
     current_model_name = getattr(model, "model_name", None) or getattr(model, "_model", None)
     if (not model) or (current_model_name and current_model_name != selected_model):
-        print(f"[!] Model not configured or outdated. Loading: {selected_model}")
+        logger.info(f"Model not configured or outdated. Loading: {selected_model}")
         model = genai.GenerativeModel(selected_model)
     if not model:
-        print("[!] Failed to configure model. Please check your API key and model.")
+        logger.error("Failed to configure model. Please check your API key and model.")
         root.after(0, show_settings_popup)
         return
     
-    print("\n[+] Hotkey detected! Capturing screen...")
+    logger.info("Hotkey detected! Capturing screen...")
     
     # Show loading indicator on main thread
     root.after(0, show_loading_indicator)
@@ -766,7 +832,7 @@ def analyze_screen():
             screenshot = ImageGrab.grab()
             
             # 2. visual feedback
-            print("[-] Screen captured. Sending to Gemini...")
+            logger.debug("Screen captured. Sending to Gemini...")
             
             # 3. Prepare the prompt based on settings
             show_explanation = app_config.get("show_explanation", True)
@@ -799,7 +865,7 @@ def analyze_screen():
             
             # 5. Hide loading indicator and display result in popup
             answer = response.text
-            print("[✓] Answer received. Displaying popup...")
+            logger.info("Answer received. Displaying popup...")
             
             # Add to history
             add_to_history(answer)
@@ -812,11 +878,11 @@ def analyze_screen():
             root.after(0, hide_loading_indicator)
             root.after(50, lambda: show_answer_popup(answer))
             
-            print(f"Ready for next query. Press {HOTKEY}...")
+            logger.debug(f"Ready for next query. Press {HOTKEY}...")
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
-            print(f"\n[!] {error_msg}")
+            logger.error(error_msg)
             # Hide loading indicator and show error
             root.after(0, hide_loading_indicator)
             root.after(50, lambda: show_answer_popup(error_msg))
@@ -830,7 +896,7 @@ def auto_copy_answer(answer_text):
     try:
         root.clipboard_clear()
         root.clipboard_append(answer_text)
-        print("[+] Answer auto-copied to clipboard")
+        logger.debug("Answer auto-copied to clipboard")
     except Exception:
         pass
 
@@ -864,7 +930,7 @@ def toggle_popup_visibility():
                 loading_indicator.deiconify()
                 loading_indicator.attributes('-alpha', 0.95)
             popup_hidden = False
-            print("[+] UI shown")
+            logger.debug("UI shown")
         else:
             # Hide the windows
             if has_popup:
@@ -872,9 +938,9 @@ def toggle_popup_visibility():
             if has_loading:
                 loading_indicator.withdraw()
             popup_hidden = True
-            print("[-] UI hidden")
+            logger.debug("UI hidden")
     else:
-        print("[!] No UI elements to hide/show")
+        logger.debug("No UI elements to hide/show")
 
 def show_history_popup():
     """Show the history popup with recent answers."""
@@ -1127,7 +1193,7 @@ def toggle_theme():
     save_config(app_config)
     
     theme_icon = "🌙" if new_theme == "dark" else "☀️"
-    print(f"[+] Theme switched to {new_theme} mode {theme_icon}")
+    logger.info(f"Theme switched to {new_theme} mode {theme_icon}")
     
     # If popup is open, refresh it with the new theme
     if popup_window and popup_window.winfo_exists():
@@ -1442,7 +1508,7 @@ def show_settings_popup():
     model_desc.pack(anchor='w', pady=(4, 8))
     
     # Model dropdown
-    model_var = tk.StringVar(value=app_config.get("model", "models/gemini-2.5-flash-preview-05-20"))
+    model_var = tk.StringVar(value=app_config.get("model", "models/gemini-2.5-flash"))
     
     # Create a styled frame for the dropdown
     dropdown_frame = tk.Frame(model_section, bg=border_color)
@@ -1462,7 +1528,7 @@ def show_settings_popup():
     model_listbox_frame.pack(fill=tk.X)
     
     # Current selection display
-    current_model_var = tk.StringVar(value=get_model_display_name(app_config.get("model", "models/gemini-2.5-flash-preview-05-20")))
+    current_model_var = tk.StringVar(value=get_model_display_name(app_config.get("model", "models/gemini-2.5-flash")))
     
     model_display = tk.Label(
         model_listbox_frame,
@@ -1512,7 +1578,7 @@ def show_settings_popup():
     def populate_models():
         dropdown_listbox.delete(0, tk.END)
         models_to_show = available_models if available_models else [
-            "models/gemini-2.5-flash-preview-05-20",
+            "models/gemini-2.5-flash",
             "models/gemini-2.5-pro-preview-05-06",
             "models/gemini-1.5-flash",
             "models/gemini-1.5-pro"
@@ -2185,7 +2251,7 @@ if __name__ == "__main__":
     
     # If no API key is set, show settings on first run
     if not API_KEY:
-        print("[!] No API key found. Opening settings...")
+        logger.warning("No API key found. Opening settings...")
         root.after(500, show_settings_popup)
     
     # Run tkinter main loop (keeps GUI responsive)

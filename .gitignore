@@ -42,3 +42,10 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+assets/logo.ico
+build.bat
+build.ps1
+version_info.txt
+ElAnswer.spec
+elanswer.log
+create_icon.py

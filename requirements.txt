@@ -1,4 +1,20 @@
-google-generativeai
-keyboard
-pillow
-pystray
+# ElAnswer - Production Dependencies
+# For development, install with: pip install -r requirements.txt
+
+# Core AI functionality
+google-generativeai>=0.3.0
+
+# Screenshot and image handling
+Pillow>=10.0.0
+
+# Global keyboard hotkeys
+keyboard>=0.13.5
+
+# System tray icon
+pystray>=0.19.0
+
+# Build tools (for creating executable)
+pyinstaller>=6.0.0
+
+# Optional: For better Windows icon support
+pywin32>=306; sys_platform == 'win32'
