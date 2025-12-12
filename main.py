@@ -52,8 +52,24 @@ IS_LINUX = sys.platform.startswith('linux')
 # Import platform-specific modules
 if IS_WINDOWS:
     import ctypes
+    import ctypes.wintypes
 else:
     ctypes = None
+
+# Windows Display Affinity constants for screen capture protection
+WDA_NONE = 0x00000000
+WDA_MONITOR = 0x00000001
+WDA_EXCLUDEFROMCAPTURE = 0x00000011  # Windows 10 2004+ (Build 19041+)
+
+# Additional Windows style constants for stealth
+WS_EX_LAYERED = 0x00080000
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_NOACTIVATE = 0x08000000
+WS_EX_TOPMOST = 0x00000008
+GWL_EXSTYLE = -20
+LWA_ALPHA = 0x00000002
+LWA_COLORKEY = 0x00000001
 
 # Cross-platform screenshot capture
 def capture_screenshot():
@@ -83,29 +99,118 @@ def open_url(url):
     except Exception as e:
         logger.error(f"Failed to open URL: {e}")
 
+def get_windows_build_number():
+    """Get Windows build number for feature detection."""
+    if not IS_WINDOWS:
+        return 0
+    try:
+        version = sys.getwindowsversion()
+        return version.build
+    except Exception:
+        return 0
+
+def set_window_display_affinity(hwnd, affinity):
+    """
+    Set window display affinity to exclude from screen capture.
+    WDA_EXCLUDEFROMCAPTURE (0x11) - Excludes window from screen capture (Win10 2004+)
+    WDA_MONITOR (0x01) - Shows black in screen captures (older Windows)
+    """
+    if not IS_WINDOWS or not ctypes:
+        return False
+    try:
+        # SetWindowDisplayAffinity function
+        result = ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, affinity)
+        return result != 0
+    except Exception as e:
+        logger.debug(f"SetWindowDisplayAffinity failed: {e}")
+        return False
+
+def make_window_stealth(window):
+    """
+    Apply stealth mode to window - makes it invisible to screen capture,
+    screen sharing software, and proctoring applications.
+    """
+    if not IS_WINDOWS or not ctypes:
+        return False
+    
+    try:
+        window.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        
+        if not hwnd:
+            hwnd = window.winfo_id()
+        
+        build_number = get_windows_build_number()
+        
+        # Apply extended window styles for stealth
+        ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        
+        # Add stealth styles:
+        # WS_EX_TOOLWINDOW - No taskbar button
+        # WS_EX_NOACTIVATE - Don't activate when clicked
+        # WS_EX_LAYERED - Required for transparency and some capture exclusion
+        ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
+        
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+        
+        # Set layered window attributes for proper rendering
+        ctypes.windll.user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+        
+        # Apply display affinity to exclude from capture
+        # Windows 10 2004+ (Build 19041+) supports WDA_EXCLUDEFROMCAPTURE
+        if build_number >= 19041:
+            # Use WDA_EXCLUDEFROMCAPTURE - completely invisible to capture
+            success = set_window_display_affinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+            if success:
+                logger.debug(f"Applied WDA_EXCLUDEFROMCAPTURE to window (Build {build_number})")
+            else:
+                # Fallback to WDA_MONITOR (shows black in captures)
+                set_window_display_affinity(hwnd, WDA_MONITOR)
+                logger.debug("Fallback to WDA_MONITOR")
+        else:
+            # Older Windows - use WDA_MONITOR (shows black in screen capture)
+            set_window_display_affinity(hwnd, WDA_MONITOR)
+            logger.debug(f"Applied WDA_MONITOR for older Windows (Build {build_number})")
+        
+        return True
+    except Exception as e:
+        logger.debug(f"Could not apply stealth mode: {e}")
+        return False
+
 # Cross-platform window styling helper
-def apply_window_style(window, style='tool'):
+def apply_window_style(window, style='tool', stealth=True):
     """
     Apply platform-specific window styling.
     style: 'tool' (no taskbar), 'popup' (no taskbar, no activate)
+    stealth: if True, apply screen capture exclusion (Windows 10 2004+)
     """
     try:
         if IS_WINDOWS and ctypes:
             window.update_idletasks()
             hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
-            GWL_EXSTYLE = -20
+            
+            if not hwnd:
+                hwnd = window.winfo_id()
+            
             ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            WS_EX_TOOLWINDOW = 0x00000080
-            WS_EX_NOACTIVATE = 0x08000000
             
             if style == 'tool':
-                ex_style = ex_style | WS_EX_TOOLWINDOW
+                ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_LAYERED
             elif style == 'popup':
-                ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+                ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
             
             ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+            
+            # Set layered window attributes
+            ctypes.windll.user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+            
+            # Apply stealth mode if requested
+            if stealth:
+                make_window_stealth(window)
+                
         elif IS_MACOS:
             # macOS-specific styling (limited options with tkinter)
+            # Note: macOS has different screen sharing APIs
             pass
         else:
             # Linux - try to set window type hint via wm attributes
@@ -317,7 +422,8 @@ def load_config():
         "max_history": 10,
         "auto_copy": False,
         "show_explanation": True,
-        "compact_mode": False
+        "compact_mode": False,
+        "stealth_mode": True  # Hide from screen capture/sharing by default
     }
     try:
         if os.path.exists(CONFIG_PATH):
@@ -494,7 +600,7 @@ def reload_model():
 
 def show_loading_indicator():
     """Shows a small blinking logo at the bottom left while Gemini is processing."""
-    global loading_indicator, logo_image
+    global loading_indicator, logo_image, app_config
     
     # Close existing indicator if any
     if loading_indicator and loading_indicator.winfo_exists():
@@ -521,8 +627,11 @@ def show_loading_indicator():
     loading_indicator.attributes('-topmost', True)
     loading_indicator.attributes('-alpha', 0.95)
     
-    # Make window undetectable (tool window style) - cross-platform
-    apply_window_style(loading_indicator, 'popup')
+    # Apply stealth mode based on settings
+    stealth_enabled = app_config.get("stealth_mode", True)
+    
+    # Make window undetectable (tool window style) - cross-platform with stealth
+    apply_window_style(loading_indicator, 'popup', stealth=stealth_enabled)
     
     # Transparent background - cross-platform
     apply_transparency(loading_indicator, '#000000')
@@ -608,6 +717,7 @@ def show_answer_popup(answer_text):
     popup_y = app_config.get("popup_y", 80)
     current_theme = app_config.get("theme", "light")
     theme = THEMES[current_theme]
+    stealth_enabled = app_config.get("stealth_mode", True)
     
     # Create new popup window
     popup_window = tk.Toplevel()
@@ -622,8 +732,8 @@ def show_answer_popup(answer_text):
     # Prevent window from stealing focus
     popup_window.focus_set = lambda: None
     
-    # Make window undetectable - cross-platform
-    apply_window_style(popup_window, 'popup')
+    # Make window undetectable - cross-platform with stealth mode
+    apply_window_style(popup_window, 'popup', stealth=stealth_enabled)
     
     # Get colors from current theme
     card_bg = theme['card_bg']
@@ -1078,6 +1188,7 @@ def show_history_popup():
     popup_y = app_config.get("popup_y", 80)
     current_theme = app_config.get("theme", "light")
     theme = THEMES[current_theme]
+    stealth_enabled = app_config.get("stealth_mode", True)
     
     # Create new popup window
     popup_window = tk.Toplevel()
@@ -1089,8 +1200,8 @@ def show_history_popup():
     popup_window.attributes('-topmost', True)
     popup_window.attributes('-alpha', 0.0)
     
-    # Make window undetectable - cross-platform
-    apply_window_style(popup_window, 'popup')
+    # Make window undetectable - cross-platform with stealth mode
+    apply_window_style(popup_window, 'popup', stealth=stealth_enabled)
     
     # Get colors from current theme
     card_bg = theme['card_bg']
@@ -1328,19 +1439,20 @@ def show_settings_popup():
     # Get theme
     current_theme = app_config.get("theme", "light")
     theme = THEMES[current_theme]
+    stealth_enabled = app_config.get("stealth_mode", True)
     
     # Create settings window
     settings_window = tk.Toplevel()
     settings_window.title("")
-    settings_window.geometry("450x550+250+100")
+    settings_window.geometry("450x600+250+100")  # Slightly taller for new option
     settings_window.overrideredirect(True)
     
     # Make it always on top
     settings_window.attributes('-topmost', True)
     settings_window.attributes('-alpha', 0.0)
     
-    # Make window tool-style (no taskbar), but allow focus for input - cross-platform
-    apply_window_style(settings_window, 'tool')
+    # Make window tool-style (no taskbar), but allow focus for input - with stealth mode
+    apply_window_style(settings_window, 'tool', stealth=stealth_enabled)
     
     # Get colors from current theme
     card_bg = theme['card_bg']
@@ -1358,12 +1470,12 @@ def show_settings_popup():
     apply_transparency(settings_window, '#000000')
     
     # Main canvas for rounded corners
-    canvas = tk.Canvas(settings_window, width=450, height=550, bg='#000000', highlightthickness=0)
+    canvas = tk.Canvas(settings_window, width=450, height=600, bg='#000000', highlightthickness=0)
     canvas.pack(fill=tk.BOTH, expand=True)
     
     # Draw rounded rectangle background
     radius = 16
-    x1, y1, x2, y2 = 0, 0, 450, 550
+    x1, y1, x2, y2 = 0, 0, 450, 600
     
     canvas.create_arc(x1, y1, x1+radius*2, y1+radius*2, start=90, extent=90, fill=card_bg, outline=card_bg)
     canvas.create_arc(x2-radius*2, y1, x2, y1+radius*2, start=0, extent=90, fill=card_bg, outline=card_bg)
@@ -1374,7 +1486,7 @@ def show_settings_popup():
     
     # Main card frame
     main_card = tk.Frame(canvas, bg=card_bg)
-    canvas.create_window(225, 275, window=main_card, width=446, height=546)
+    canvas.create_window(225, 300, window=main_card, width=446, height=596)
     
     # Top bar
     top_bar = tk.Frame(main_card, bg=card_bg, height=50)
@@ -1937,6 +2049,7 @@ def show_settings_popup():
     auto_copy_var = tk.BooleanVar(value=app_config.get("auto_copy", False))
     show_explanation_var = tk.BooleanVar(value=app_config.get("show_explanation", True))
     compact_mode_var = tk.BooleanVar(value=app_config.get("compact_mode", False))
+    stealth_mode_var = tk.BooleanVar(value=app_config.get("stealth_mode", True))
     
     def create_checkbox(parent, text, variable, description=""):
         cb_frame = tk.Frame(parent, bg=card_bg)
@@ -2006,6 +2119,7 @@ def show_settings_popup():
     create_checkbox(options_section, "Auto-copy answers to clipboard", auto_copy_var, "Automatically copy each answer when received")
     create_checkbox(options_section, "Show detailed explanations", show_explanation_var, "Include step-by-step explanations in answers")
     create_checkbox(options_section, "Compact mode", compact_mode_var, "Use smaller popup windows")
+    create_checkbox(options_section, "🔒 Stealth mode (hide from screen share)", stealth_mode_var, "Hide windows from screen capture, sharing, and proctoring software")
     
     # === HISTORY LIMIT SECTION ===
     history_section = tk.Frame(content_frame, bg=card_bg)
@@ -2074,6 +2188,7 @@ def show_settings_popup():
         app_config["auto_copy"] = auto_copy_var.get()
         app_config["show_explanation"] = show_explanation_var.get()
         app_config["compact_mode"] = compact_mode_var.get()
+        app_config["stealth_mode"] = stealth_mode_var.get()
         app_config["max_history"] = max_history_var.get()
         
         # Update MAX_HISTORY_ITEMS
