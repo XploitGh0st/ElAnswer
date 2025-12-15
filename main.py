@@ -7,7 +7,7 @@
 ║  Description:  Captures screen content and uses Google Gemini AI to          ║
 ║                analyze and solve questions, problems, or code snippets.      ║
 ║                                                                               ║
-║  Version:      1.2.0                                                          ║
+║  Version:      1.3.0                                                          ║
 ║  Created:      December 2025                                                  ║
 ║  License:      MIT                                                            ║
 ║                                                                               ║
@@ -125,10 +125,12 @@ def set_window_display_affinity(hwnd, affinity):
         logger.debug(f"SetWindowDisplayAffinity failed: {e}")
         return False
 
-def make_window_stealth(window):
+def make_window_stealth(window, allow_input=False):
     """
     Apply stealth mode to window - makes it invisible to screen capture,
     screen sharing software, and proctoring applications.
+    
+    allow_input: if True, don't apply WS_EX_NOACTIVATE (allows keyboard/mouse input)
     """
     if not IS_WINDOWS or not ctypes:
         return False
@@ -147,9 +149,12 @@ def make_window_stealth(window):
         
         # Add stealth styles:
         # WS_EX_TOOLWINDOW - No taskbar button
-        # WS_EX_NOACTIVATE - Don't activate when clicked
         # WS_EX_LAYERED - Required for transparency and some capture exclusion
-        ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
+        ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_LAYERED
+        
+        # Only add WS_EX_NOACTIVATE if we don't need keyboard input
+        if not allow_input:
+            ex_style = ex_style | WS_EX_NOACTIVATE
         
         ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
         
@@ -178,11 +183,12 @@ def make_window_stealth(window):
         return False
 
 # Cross-platform window styling helper
-def apply_window_style(window, style='tool', stealth=True):
+def apply_window_style(window, style='tool', stealth=True, allow_input=False):
     """
     Apply platform-specific window styling.
     style: 'tool' (no taskbar), 'popup' (no taskbar, no activate)
     stealth: if True, apply screen capture exclusion (Windows 10 2004+)
+    allow_input: if True, allow keyboard/mouse input (don't apply WS_EX_NOACTIVATE)
     """
     try:
         if IS_WINDOWS and ctypes:
@@ -194,9 +200,11 @@ def apply_window_style(window, style='tool', stealth=True):
             
             ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             
-            if style == 'tool':
+            if style == 'tool' or allow_input:
+                # Tool style allows input
                 ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_LAYERED
             elif style == 'popup':
+                # Popup style blocks input (for display-only windows)
                 ex_style = ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
             
             ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
@@ -204,9 +212,9 @@ def apply_window_style(window, style='tool', stealth=True):
             # Set layered window attributes
             ctypes.windll.user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
             
-            # Apply stealth mode if requested
+            # Apply stealth mode if requested (pass allow_input to preserve input capability)
             if stealth:
-                make_window_stealth(window)
+                make_window_stealth(window, allow_input=allow_input)
                 
         elif IS_MACOS:
             # macOS-specific styling (limited options with tkinter)
@@ -260,7 +268,7 @@ def get_system_font():
         return 'DejaVu Sans'
 
 # Application version
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 APP_NAME = "ElAnswer"
 
 # Determine if running as frozen executable (PyInstaller)
@@ -484,9 +492,8 @@ def add_to_history(answer_text):
     # Save to file
     save_history()
     
-    # Update tray menu if available
-    if tray_icon:
-        tray_icon.update_menu()
+    # Update tray menu if available (pystray auto-updates dynamic menus)
+    # Note: pystray dynamically rebuilds menu on each click, no explicit update needed
 
 def extract_preview(answer_text):
     """Extract a short preview from the answer text."""
@@ -961,6 +968,8 @@ def show_answer_popup(answer_text):
             save_config(app_config)
     
     def fade_out_window(alpha=0.98):
+        if not popup_window or not popup_window.winfo_exists():
+            return
         if alpha > 0:
             alpha -= 0.12
             popup_window.attributes('-alpha', alpha)
@@ -1346,8 +1355,7 @@ def show_history_popup():
         global answer_history
         answer_history = []
         save_history()
-        if tray_icon:
-            tray_icon.update_menu()
+        # pystray dynamically rebuilds menu, no explicit update needed
         fade_out()
     
     clear_btn = tk.Button(
@@ -1370,6 +1378,8 @@ def show_history_popup():
     
     # Animations
     def fade_in(alpha=0.0):
+        if not popup_window or not popup_window.winfo_exists():
+            return
         if alpha < 0.98:
             alpha += 0.1
             popup_window.attributes('-alpha', alpha)
@@ -1378,12 +1388,17 @@ def show_history_popup():
             popup_window.attributes('-alpha', 0.98)
     
     def fade_out(alpha=0.98):
+        if not popup_window or not popup_window.winfo_exists():
+            return
         if alpha > 0:
             alpha -= 0.12
             popup_window.attributes('-alpha', alpha)
             popup_window.after(12, lambda: fade_out(alpha))
         else:
-            list_canvas.unbind_all("<MouseWheel>")
+            try:
+                list_canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
             popup_window.destroy()
     
     popup_window.bind('<Escape>', lambda e: fade_out())
@@ -1451,8 +1466,11 @@ def show_settings_popup():
     settings_window.attributes('-topmost', True)
     settings_window.attributes('-alpha', 0.0)
     
-    # Make window tool-style (no taskbar), but allow focus for input - with stealth mode
-    apply_window_style(settings_window, 'tool', stealth=stealth_enabled)
+    # Make window tool-style (no taskbar), allow input for text fields - with stealth mode
+    apply_window_style(settings_window, 'tool', stealth=stealth_enabled, allow_input=True)
+    
+    # Force focus to allow keyboard input
+    settings_window.focus_force()
     
     # Get colors from current theme
     card_bg = theme['card_bg']
@@ -2204,9 +2222,7 @@ def show_settings_popup():
             # Reload model if changed
             reload_model()
         
-        # Update tray menu
-        if tray_icon:
-            tray_icon.update_menu()
+        # pystray dynamically rebuilds menu on each click, no explicit update needed
         
         # Show confirmation
         save_btn.config(text="✓ Saved!")
@@ -2293,7 +2309,10 @@ def show_settings_popup():
             settings_window.attributes('-alpha', alpha)
             settings_window.after(12, lambda: fade_out(alpha))
         else:
-            scroll_canvas.unbind_all("<MouseWheel>")
+            try:
+                scroll_canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
             settings_window.destroy()
     
     settings_window.bind('<Escape>', lambda e: fade_out())

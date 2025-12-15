@@ -42,12 +42,8 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated files
 assets/logo.ico
-build.bat
-build.ps1
-version_info.txt
-ElAnswer.spec
 elanswer.log
 create_icon.py
-build_macos.sh
-build_linux.sh
