@@ -2465,8 +2465,55 @@ def hide_console():
     # (typically launched from terminal or as a background process)
 
 
+def check_linux_permissions():
+    """Check if we have the required permissions on Linux."""
+    if not IS_LINUX:
+        return True
+    
+    import os
+    if os.geteuid() == 0:
+        return True
+    
+    # Check if we can access input devices
+    try:
+        # Try to find readable input devices
+        input_dir = '/dev/input'
+        if os.path.exists(input_dir):
+            for device in os.listdir(input_dir):
+                if device.startswith('event'):
+                    device_path = os.path.join(input_dir, device)
+                    if os.access(device_path, os.R_OK):
+                        return True
+    except Exception:
+        pass
+    
+    return False
+
+
 # Main Execution
 if __name__ == "__main__":
+    # Check Linux permissions before initializing keyboard
+    if IS_LINUX and not check_linux_permissions():
+        print("")
+        print("=" * 60)
+        print("  ElAnswer - Root Permission Required on Linux")
+        print("=" * 60)
+        print("")
+        print("  The 'keyboard' library requires root access to capture")
+        print("  global hotkeys on Linux.")
+        print("")
+        print("  Please run ElAnswer with sudo:")
+        print("")
+        print("    sudo ./ElAnswer")
+        print("")
+        print("  Or add your user to the 'input' group:")
+        print("")
+        print("    sudo usermod -aG input $USER")
+        print("    # Then log out and log back in")
+        print("")
+        print("=" * 60)
+        sys.exit(1)
+    
     model = configure_genai()
     
     # Create hidden root window for tkinter
