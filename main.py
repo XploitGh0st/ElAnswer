@@ -426,7 +426,7 @@ def load_config():
         "popup_x": 200,
         "popup_y": 80,
         "theme": "light",
-        "model": "models/gemini-2.5-flash",
+        "model": "models/gemini-3-flash-preview",
         "max_history": 10,
         "auto_copy": False,
         "show_explanation": True,
@@ -547,7 +547,7 @@ def configure_genai():
         threading.Thread(target=fetch_available_models, daemon=True).start()
         
         # Use saved model or default
-        selected_model = app_config.get("model", "models/gemini-2.5-flash")
+        selected_model = app_config.get("model", "models/gemini-3-flash-preview")
         model = genai.GenerativeModel(selected_model)
         return model
     except Exception as e:
@@ -598,7 +598,7 @@ def fetch_available_models():
 def reload_model():
     """Reload the model with current settings."""
     global model
-    selected_model = app_config.get("model", "models/gemini-2.5-flash")
+    selected_model = app_config.get("model", "models/gemini-3-flash-preview")
     try:
         model = genai.GenerativeModel(selected_model)
         logger.info(f"Model changed to: {selected_model}")
@@ -1027,7 +1027,7 @@ def analyze_screen():
         return
     
     # Check if model is configured
-    selected_model = app_config.get("model", "models/gemini-2.5-flash")
+    selected_model = app_config.get("model", "models/gemini-3-flash-preview")
     current_model_name = getattr(model, "model_name", None) or getattr(model, "_model", None)
     if (not model) or (current_model_name and current_model_name != selected_model):
         logger.info(f"Model not configured or outdated. Loading: {selected_model}")
@@ -1741,7 +1741,7 @@ def show_settings_popup():
     model_desc.pack(anchor='w', pady=(4, 8))
     
     # Model dropdown
-    model_var = tk.StringVar(value=app_config.get("model", "models/gemini-2.5-flash"))
+    model_var = tk.StringVar(value=app_config.get("model", "models/gemini-3-flash-preview"))
     
     # Create a styled frame for the dropdown
     dropdown_frame = tk.Frame(model_section, bg=border_color)
@@ -1761,7 +1761,7 @@ def show_settings_popup():
     model_listbox_frame.pack(fill=tk.X)
     
     # Current selection display
-    current_model_var = tk.StringVar(value=get_model_display_name(app_config.get("model", "models/gemini-2.5-flash")))
+    current_model_var = tk.StringVar(value=get_model_display_name(app_config.get("model", "models/gemini-3-flash-preview")))
     
     model_display = tk.Label(
         model_listbox_frame,
