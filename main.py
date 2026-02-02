@@ -35,6 +35,8 @@ import logging
 import platform
 import subprocess
 import webbrowser
+import base64
+import io
 from datetime import datetime
 import keyboard  # For detecting key presses
 import google.generativeai as genai
@@ -43,6 +45,7 @@ import tkinter as tk
 from tkinter import scrolledtext, messagebox
 import threading
 import pystray  # For system tray icon
+import requests  # For Ollama API calls
 
 # Platform detection
 IS_WINDOWS = sys.platform == 'win32'
@@ -367,6 +370,18 @@ HISTORY_HOTKEY = "ctrl+alt+h"
 # The Hotkey combination to open settings
 SETTINGS_HOTKEY = "ctrl+alt+p"
 
+# The Hotkey combination to toggle question mode (MCQ/Coding)
+MODE_HOTKEY = "ctrl+alt+m"
+
+# The Hotkey combination to copy the last response
+COPY_HOTKEY = "ctrl+alt+c"
+
+# The Hotkey combination to start auto-typing the last response
+AUTO_TYPE_HOTKEY = "ctrl+alt+a"
+
+# The Hotkey combination to pause/resume auto-typing
+PAUSE_TYPE_HOTKEY = "ctrl+alt+="
+
 # Maximum number of history items to keep
 MAX_HISTORY_ITEMS = 10
 
@@ -381,6 +396,17 @@ tray_icon = None  # System tray icon
 settings_window = None  # Settings window
 available_models = []  # Available Gemini models
 model = None  # Current Gemini model instance
+
+# Ollama globals
+ollama_available_models = []  # Available Ollama models
+ollama_connected = False  # Track Ollama connection status
+
+# Auto-type globals
+auto_type_active = False  # Is auto-typing currently in progress
+auto_type_paused = False  # Is auto-typing paused
+auto_type_thread = None  # Thread running auto-type
+auto_type_stop_event = None  # Event to stop auto-typing
+auto_type_pause_event = None  # Event to pause auto-typing
 
 # Get paths using the helper functions for proper executable support
 LOGO_PATH = get_resource_path(os.path.join("assets", "logo.png"))
@@ -431,7 +457,16 @@ def load_config():
         "auto_copy": False,
         "show_explanation": True,
         "compact_mode": False,
-        "stealth_mode": True  # Hide from screen capture/sharing by default
+        "stealth_mode": True,  # Hide from screen capture/sharing by default
+        "question_mode": "mcq",  # "mcq" or "coding"
+        "programming_language": "Python",  # Default language for coding mode
+        # Auto-type settings
+        "auto_type_enabled": True,
+        "auto_type_wpm": 60,  # Words per minute for auto-typing
+        # Ollama settings
+        "ollama_enabled": False,
+        "ollama_url": "http://localhost:11434",
+        "ollama_model": ""
     }
     try:
         if os.path.exists(CONFIG_PATH):
@@ -533,6 +568,11 @@ def configure_genai():
     """Configures the Gemini API."""
     global available_models, API_KEY, model
     
+    # Skip Gemini configuration if Ollama is enabled
+    if app_config.get("ollama_enabled", False):
+        logger.info("Ollama is enabled, skipping Gemini configuration.")
+        return None
+    
     # Reload API key from config in case it was updated
     API_KEY = app_config.get("api_key", "") or os.environ.get("GEMINI_API_KEY", "")
     
@@ -604,6 +644,97 @@ def reload_model():
         logger.info(f"Model changed to: {selected_model}")
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
+
+
+# ============== OLLAMA FUNCTIONS ============== #
+
+def fetch_ollama_models(ollama_url=None):
+    """Fetch available models from Ollama server."""
+    global ollama_available_models, ollama_connected
+    
+    if ollama_url is None:
+        ollama_url = app_config.get("ollama_url", "http://localhost:11434")
+    
+    # Ensure URL doesn't have trailing slash
+    ollama_url = ollama_url.rstrip('/')
+    
+    try:
+        response = requests.get(f"{ollama_url}/api/tags", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            models = data.get("models", [])
+            ollama_available_models = [m.get("name", "") for m in models if m.get("name")]
+            ollama_connected = True
+            logger.info(f"Ollama connected. Found {len(ollama_available_models)} models.")
+            return ollama_available_models
+        else:
+            logger.warning(f"Ollama returned status {response.status_code}")
+            ollama_connected = False
+            return []
+    except requests.exceptions.ConnectionError:
+        logger.warning(f"Could not connect to Ollama at {ollama_url}")
+        ollama_connected = False
+        return []
+    except requests.exceptions.Timeout:
+        logger.warning(f"Ollama connection timed out at {ollama_url}")
+        ollama_connected = False
+        return []
+    except Exception as e:
+        logger.warning(f"Error fetching Ollama models: {e}")
+        ollama_connected = False
+        return []
+
+
+def query_ollama(image, prompt):
+    """Send an image and prompt to Ollama for analysis."""
+    global app_config
+    
+    ollama_url = app_config.get("ollama_url", "http://localhost:11434").rstrip('/')
+    ollama_model = app_config.get("ollama_model", "")
+    
+    if not ollama_model:
+        raise Exception("No Ollama model selected. Please select a model in Settings.")
+    
+    try:
+        # Convert PIL Image to base64
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        image_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        
+        # Prepare the request payload
+        payload = {
+            "model": ollama_model,
+            "prompt": prompt,
+            "images": [image_base64],
+            "stream": False
+        }
+        
+        # Send request to Ollama
+        response = requests.post(
+            f"{ollama_url}/api/generate",
+            json=payload,
+            timeout=120  # 2 minute timeout for generation
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("response", "No response received from Ollama")
+        else:
+            error_msg = f"Ollama returned status {response.status_code}"
+            try:
+                error_data = response.json()
+                if "error" in error_data:
+                    error_msg = f"Ollama error: {error_data['error']}"
+            except:
+                pass
+            raise Exception(error_msg)
+            
+    except requests.exceptions.ConnectionError:
+        raise Exception(f"Could not connect to Ollama at {ollama_url}. Make sure Ollama is running.")
+    except requests.exceptions.Timeout:
+        raise Exception("Ollama request timed out. The model may be taking too long to respond.")
+    except Exception as e:
+        raise Exception(f"Ollama error: {str(e)}")
 
 def show_loading_indicator():
     """Shows a small blinking logo at the bottom left while Gemini is processing."""
@@ -895,16 +1026,96 @@ def show_answer_popup(answer_text):
     buttons_frame = tk.Frame(footer_section, bg=card_bg)
     buttons_frame.pack(fill=tk.X)
     
+    # Extract code from answer (for Copy Code button)
+    def extract_code_from_answer(text):
+        """Extract code blocks from the answer text."""
+        import re
+        # Match code between ``` markers
+        code_blocks = re.findall(r'```(?:\w*\n)?(.*?)```', text, re.DOTALL)
+        if code_blocks:
+            return '\n\n'.join(block.strip() for block in code_blocks)
+        # Fallback: return the full text if no code blocks found
+        return text
+    
+    # Copy Code button - extracts code from code blocks, or copies full text if no code blocks
+    def copy_code_to_clipboard():
+        code = extract_code_from_answer(answer_text)
+        popup_window.clipboard_clear()
+        popup_window.clipboard_append(code)
+        copy_code_btn.config(text="✓ Copied")
+        popup_window.after(2000, lambda: copy_code_btn.config(text="📋 Copy Code"))
+    
+    copy_code_btn = tk.Button(
+        buttons_frame,
+        text="📋 Copy Code",
+        command=copy_code_to_clipboard,
+        font=(get_system_font(), 10),
+        bg=green_accent,
+        fg='white',
+        relief=tk.FLAT,
+        padx=16,
+        pady=8,
+        cursor='hand2',
+        borderwidth=0,
+        activebackground='#16a34a',
+        activeforeground='white'
+    )
+    copy_code_btn.pack(side=tk.LEFT, padx=(0, 8))
+    copy_code_btn.bind('<Enter>', lambda e: copy_code_btn.config(bg='#16a34a'))
+    copy_code_btn.bind('<Leave>', lambda e: copy_code_btn.config(bg=green_accent))
+    
+    # Auto-type button - types the response automatically
+    auto_type_btn_state = {'typing': False}
+    
+    def on_auto_type_click():
+        if auto_type_btn_state['typing']:
+            # Stop typing
+            stop_auto_type()
+            auto_type_btn.config(text="⌨️ Auto-Type", bg='#6366f1')
+            auto_type_btn_state['typing'] = False
+        else:
+            # Start typing
+            start_auto_type(answer_text)
+            auto_type_btn.config(text="⏹️ Stop", bg='#ef4444')
+            auto_type_btn_state['typing'] = True
+            # Reset button after typing completes (check periodically)
+            def check_typing():
+                if not auto_type_active:
+                    auto_type_btn.config(text="⌨️ Auto-Type", bg='#6366f1')
+                    auto_type_btn_state['typing'] = False
+                elif popup_window and popup_window.winfo_exists():
+                    popup_window.after(500, check_typing)
+            popup_window.after(1000, check_typing)
+    
+    auto_type_btn = tk.Button(
+        buttons_frame,
+        text="⌨️ Auto-Type",
+        command=on_auto_type_click,
+        font=(get_system_font(), 10),
+        bg='#6366f1',
+        fg='white',
+        relief=tk.FLAT,
+        padx=16,
+        pady=8,
+        cursor='hand2',
+        borderwidth=0,
+        activebackground='#4f46e5',
+        activeforeground='white'
+    )
+    auto_type_btn.pack(side=tk.LEFT, padx=(0, 8))
+    auto_type_btn.bind('<Enter>', lambda e: auto_type_btn.config(bg='#4f46e5' if not auto_type_btn_state['typing'] else '#dc2626'))
+    auto_type_btn.bind('<Leave>', lambda e: auto_type_btn.config(bg='#6366f1' if not auto_type_btn_state['typing'] else '#ef4444'))
+    
     # Copy button (primary - dark)
     def copy_to_clipboard():
         popup_window.clipboard_clear()
         popup_window.clipboard_append(answer_text)
         copy_btn.config(text="✓ Copied")
-        popup_window.after(2000, lambda: copy_btn.config(text="Copy"))
+        popup_window.after(2000, lambda: copy_btn.config(text="Copy All"))
     
     copy_btn = tk.Button(
         buttons_frame,
-        text="Copy",
+        text="Copy All",
         command=copy_to_clipboard,
         font=(get_system_font(), 10),
         bg=accent_color,
@@ -1017,27 +1228,39 @@ def show_answer_popup(answer_text):
     popup_window.after(500, pulse_status)
     
 def analyze_screen():
-    """Captures screen, sends to Gemini, and displays answer in popup."""
+    """Captures screen, sends to Gemini or Ollama, and displays answer in popup."""
     global app_config, model
     
-    # Check if API key is configured
-    if not API_KEY:
-        logger.warning("No API key configured. Opening settings...")
-        root.after(0, show_settings_popup)
-        return
+    # Check if using Ollama or Gemini
+    use_ollama = app_config.get("ollama_enabled", False)
     
-    # Check if model is configured
-    selected_model = app_config.get("model", "models/gemini-3-flash-preview")
-    current_model_name = getattr(model, "model_name", None) or getattr(model, "_model", None)
-    if (not model) or (current_model_name and current_model_name != selected_model):
-        logger.info(f"Model not configured or outdated. Loading: {selected_model}")
-        model = genai.GenerativeModel(selected_model)
-    if not model:
-        logger.error("Failed to configure model. Please check your API key and model.")
-        root.after(0, show_settings_popup)
-        return
+    if use_ollama:
+        # Validate Ollama configuration
+        ollama_model = app_config.get("ollama_model", "")
+        if not ollama_model:
+            logger.warning("No Ollama model selected. Opening settings...")
+            root.after(0, show_settings_popup)
+            return
+    else:
+        # Check if API key is configured for Gemini
+        if not API_KEY:
+            logger.warning("No API key configured. Opening settings...")
+            root.after(0, show_settings_popup)
+            return
+        
+        # Check if model is configured
+        selected_model = app_config.get("model", "models/gemini-3-flash-preview")
+        current_model_name = getattr(model, "model_name", None) or getattr(model, "_model", None)
+        if (not model) or (current_model_name and current_model_name != selected_model):
+            logger.info(f"Model not configured or outdated. Loading: {selected_model}")
+            model = genai.GenerativeModel(selected_model)
+        if not model:
+            logger.error("Failed to configure model. Please check your API key and model.")
+            root.after(0, show_settings_popup)
+            return
     
-    logger.info("Hotkey detected! Capturing screen...")
+    backend_name = "Ollama" if use_ollama else "Gemini"
+    logger.info(f"Hotkey detected! Capturing screen (using {backend_name})...")
     
     # Show loading indicator on main thread
     root.after(0, show_loading_indicator)
@@ -1051,12 +1274,29 @@ def analyze_screen():
                 raise Exception("Failed to capture screenshot")
             
             # 2. visual feedback
-            logger.debug("Screen captured. Sending to Gemini...")
+            logger.debug(f"Screen captured. Sending to {backend_name}...")
             
             # 3. Prepare the prompt based on settings
+            question_mode = app_config.get("question_mode", "mcq")
             show_explanation = app_config.get("show_explanation", True)
             
-            if show_explanation:
+            if question_mode == "coding":
+                # Coding mode - just return the code solution
+                prog_lang = app_config.get("programming_language", "Python")
+                prompt = (
+                    f"Analyze this image containing a coding problem (e.g., LeetCode, HackerRank, etc.).\n\n"
+                    f"Provide ONLY the complete, working code solution in {prog_lang}. No explanation needed.\n\n"
+                    f"Format your response as:\n\n"
+                    f"```{prog_lang.lower()}\n"
+                    f"[Your complete code solution here]\n"
+                    f"```\n\n"
+                    f"Requirements:\n"
+                    f"- Provide clean, efficient, and correct {prog_lang} code\n"
+                    f"- Include all necessary imports\n"
+                    f"- Handle edge cases\n"
+                    f"- No explanations, comments only if necessary for clarity"
+                )
+            elif show_explanation:
                 prompt = (
                     "Analyze this image. Identify the main question, problem, or code snippet present on the screen.\n\n"
                     "Format your response EXACTLY as follows:\n\n"
@@ -1079,11 +1319,14 @@ def analyze_screen():
                     "Keep the response brief and to the point."
                 )
 
-            # 4. Send to Gemini
-            response = model.generate_content([prompt, screenshot])
+            # 4. Send to appropriate backend
+            if use_ollama:
+                answer = query_ollama(screenshot, prompt)
+            else:
+                response = model.generate_content([prompt, screenshot])
+                answer = response.text
             
             # 5. Hide loading indicator and display result in popup
-            answer = response.text
             logger.info("Answer received. Displaying popup...")
             
             # Add to history
@@ -1443,6 +1686,167 @@ def toggle_theme():
             pass
 
 
+def toggle_question_mode():
+    """Toggle between MCQ and Coding question modes."""
+    global app_config
+    
+    current_mode = app_config.get("question_mode", "mcq")
+    new_mode = "coding" if current_mode == "mcq" else "mcq"
+    app_config["question_mode"] = new_mode
+    save_config(app_config)
+    
+    mode_icon = "💻" if new_mode == "coding" else "📝"
+    mode_name = "Coding" if new_mode == "coding" else "MCQ"
+    logger.info(f"Question mode switched to {mode_name} {mode_icon}")
+    
+    # Show a quick notification popup with language info for coding mode
+    if new_mode == "coding":
+        lang = app_config.get("programming_language", "Python")
+        show_answer_popup(f"{mode_icon} Mode: {mode_name} ({lang})\n\nPress {HOTKEY} to capture screen.")
+    else:
+        show_answer_popup(f"{mode_icon} Mode: {mode_name}\n\nPress {HOTKEY} to capture screen.")
+
+
+def copy_last_response():
+    """Copy the last response to clipboard."""
+    global answer_history, root
+    
+    if answer_history and len(answer_history) > 0:
+        last_answer = answer_history[0].get("answer", "")
+        if last_answer:
+            try:
+                root.clipboard_clear()
+                root.clipboard_append(last_answer)
+                logger.info("Last response copied to clipboard")
+            except Exception as e:
+                logger.error(f"Failed to copy to clipboard: {e}")
+    else:
+        logger.debug("No response to copy")
+
+
+def start_auto_type(text=None):
+    """Start auto-typing the given text or last response at configured WPM."""
+    global auto_type_active, auto_type_paused, auto_type_thread, auto_type_stop_event, auto_type_pause_event, answer_history, app_config
+    
+    # Check if auto-type is enabled
+    if not app_config.get("auto_type_enabled", True):
+        logger.debug("Auto-type is disabled in settings")
+        return
+    
+    # If already typing, stop it first
+    if auto_type_active:
+        stop_auto_type()
+        return
+    
+    # Get text to type
+    if text is None:
+        if answer_history and len(answer_history) > 0:
+            text = answer_history[0].get("answer", "")
+        else:
+            logger.debug("No text to auto-type")
+            return
+    
+    if not text:
+        logger.debug("Empty text to auto-type")
+        return
+    
+    # Set up events
+    auto_type_stop_event = threading.Event()
+    auto_type_pause_event = threading.Event()
+    auto_type_pause_event.set()  # Not paused initially
+    
+    auto_type_active = True
+    auto_type_paused = False
+    
+    # Get WPM from settings
+    wpm = app_config.get("auto_type_wpm", 30)
+    
+    # Calculate delay between characters
+    # Average word is 5 characters, so chars per minute = WPM * 5
+    # Delay per char = 60 / (WPM * 5) seconds
+    char_delay = 60.0 / (wpm * 5)
+    
+    def type_worker():
+        global auto_type_active, auto_type_paused
+        
+        logger.info(f"Auto-typing started at {wpm} WPM ({len(text)} characters)")
+        
+        try:
+            for char in text:
+                # Check if we should stop
+                if auto_type_stop_event.is_set():
+                    logger.info("Auto-typing stopped by user")
+                    break
+                
+                # Wait if paused
+                while not auto_type_pause_event.is_set():
+                    if auto_type_stop_event.is_set():
+                        break
+                    auto_type_stop_event.wait(0.1)
+                
+                if auto_type_stop_event.is_set():
+                    break
+                
+                # Type the character
+                try:
+                    keyboard.write(char, delay=0)
+                except Exception as e:
+                    logger.debug(f"Error typing character: {e}")
+                
+                # Wait for the delay
+                auto_type_stop_event.wait(char_delay)
+            
+            logger.info("Auto-typing completed")
+        except Exception as e:
+            logger.error(f"Auto-type error: {e}")
+        finally:
+            auto_type_active = False
+            auto_type_paused = False
+    
+    # Start the typing thread
+    auto_type_thread = threading.Thread(target=type_worker, daemon=True)
+    auto_type_thread.start()
+    
+    logger.info(f"Auto-type started. Press {PAUSE_TYPE_HOTKEY} to pause/resume, {AUTO_TYPE_HOTKEY} to stop.")
+
+
+def stop_auto_type():
+    """Stop the currently running auto-type."""
+    global auto_type_active, auto_type_paused, auto_type_stop_event
+    
+    if auto_type_stop_event:
+        auto_type_stop_event.set()
+    
+    auto_type_active = False
+    auto_type_paused = False
+    logger.info("Auto-type stopped")
+
+
+def toggle_auto_type_pause():
+    """Pause or resume the currently running auto-type."""
+    global auto_type_active, auto_type_paused, auto_type_pause_event
+    
+    if not auto_type_active:
+        logger.debug("No auto-type in progress to pause/resume")
+        return
+    
+    if auto_type_paused:
+        # Resume
+        auto_type_pause_event.set()
+        auto_type_paused = False
+        logger.info("Auto-type resumed")
+    else:
+        # Pause
+        auto_type_pause_event.clear()
+        auto_type_paused = True
+        logger.info("Auto-type paused. Press " + PAUSE_TYPE_HOTKEY + " to resume.")
+
+
+def auto_type_last_response():
+    """Hotkey handler to auto-type the last response."""
+    start_auto_type()
+
+
 def show_settings_popup():
     """Show the settings popup with model selection and other options."""
     global settings_window, app_config, available_models
@@ -1459,7 +1863,7 @@ def show_settings_popup():
     # Create settings window
     settings_window = tk.Toplevel()
     settings_window.title("")
-    settings_window.geometry("450x600+250+100")  # Slightly taller for new option
+    settings_window.geometry("450x750+250+50")  # Taller for Ollama section
     settings_window.overrideredirect(True)
     
     # Make it always on top
@@ -1488,12 +1892,12 @@ def show_settings_popup():
     apply_transparency(settings_window, '#000000')
     
     # Main canvas for rounded corners
-    canvas = tk.Canvas(settings_window, width=450, height=600, bg='#000000', highlightthickness=0)
+    canvas = tk.Canvas(settings_window, width=450, height=750, bg='#000000', highlightthickness=0)
     canvas.pack(fill=tk.BOTH, expand=True)
     
     # Draw rounded rectangle background
     radius = 16
-    x1, y1, x2, y2 = 0, 0, 450, 600
+    x1, y1, x2, y2 = 0, 0, 450, 750
     
     canvas.create_arc(x1, y1, x1+radius*2, y1+radius*2, start=90, extent=90, fill=card_bg, outline=card_bg)
     canvas.create_arc(x2-radius*2, y1, x2, y1+radius*2, start=0, extent=90, fill=card_bg, outline=card_bg)
@@ -1504,7 +1908,7 @@ def show_settings_popup():
     
     # Main card frame
     main_card = tk.Frame(canvas, bg=card_bg)
-    canvas.create_window(225, 300, window=main_card, width=446, height=596)
+    canvas.create_window(225, 375, window=main_card, width=446, height=746)
     
     # Top bar
     top_bar = tk.Frame(main_card, bg=card_bg, height=50)
@@ -1716,6 +2120,278 @@ def show_settings_popup():
         {'widget': show_key_btn, 'type': 'secondary'},
         {'widget': api_status_frame, 'type': 'bg_only'},
         {'widget': save_key_btn, 'type': 'button_accent'},
+    ])
+    
+    # === OLLAMA SECTION ===
+    ollama_section = tk.Frame(content_frame, bg=card_bg)
+    ollama_section.pack(fill=tk.X, pady=(0, 20))
+    
+    ollama_header = tk.Frame(ollama_section, bg=card_bg)
+    ollama_header.pack(fill=tk.X)
+    
+    ollama_icon = tk.Label(ollama_header, text="🦙", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
+    ollama_icon.pack(side=tk.LEFT)
+    
+    ollama_title = tk.Label(ollama_header, text="Ollama (Local/Remote)", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
+    ollama_title.pack(side=tk.LEFT, padx=(6, 0))
+    
+    ollama_desc = tk.Label(
+        ollama_section,
+        text="Connect to Ollama server (local or AWS)",
+        font=(get_system_font(), 9),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    ollama_desc.pack(anchor='w', pady=(4, 8))
+    
+    # Enable Ollama checkbox
+    ollama_enabled_var = tk.BooleanVar(value=app_config.get("ollama_enabled", False))
+    
+    ollama_enable_frame = tk.Frame(ollama_section, bg=card_bg)
+    ollama_enable_frame.pack(fill=tk.X, pady=(0, 8))
+    
+    ollama_cb_box = tk.Frame(ollama_enable_frame, bg=border_color, width=20, height=20, cursor='hand2')
+    ollama_cb_box.pack(side=tk.LEFT)
+    ollama_cb_box.pack_propagate(False)
+    
+    ollama_cb_inner = tk.Frame(ollama_cb_box, bg=light_gray)
+    ollama_cb_inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+    
+    ollama_cb_check = tk.Label(ollama_cb_inner, text="", font=(get_system_font(), 10), bg=light_gray, fg=accent_color)
+    ollama_cb_check.pack(expand=True)
+    
+    def update_ollama_checkbox():
+        if ollama_enabled_var.get():
+            ollama_cb_check.config(text="✓")
+            ollama_cb_box.config(bg=accent_color)
+        else:
+            ollama_cb_check.config(text="")
+            ollama_cb_box.config(bg=border_color)
+    
+    def toggle_ollama_cb(e=None):
+        ollama_enabled_var.set(not ollama_enabled_var.get())
+        update_ollama_checkbox()
+    
+    update_ollama_checkbox()
+    
+    for widget in [ollama_cb_box, ollama_cb_inner, ollama_cb_check]:
+        widget.bind('<Button-1>', toggle_ollama_cb)
+    
+    ollama_enable_label = tk.Label(ollama_enable_frame, text="Use Ollama instead of Gemini", font=(get_system_font(), 10), bg=card_bg, fg=text_color, cursor='hand2')
+    ollama_enable_label.pack(side=tk.LEFT, padx=(10, 0))
+    ollama_enable_label.bind('<Button-1>', toggle_ollama_cb)
+    
+    # Ollama URL input
+    ollama_url_label = tk.Label(
+        ollama_section,
+        text="Ollama Server URL:",
+        font=(get_system_font(), 9),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    ollama_url_label.pack(anchor='w', pady=(4, 4))
+    
+    ollama_url_frame = tk.Frame(ollama_section, bg=border_color)
+    ollama_url_frame.pack(fill=tk.X)
+    
+    ollama_url_inner = tk.Frame(ollama_url_frame, bg=light_gray)
+    ollama_url_inner.pack(fill=tk.X, padx=1, pady=1)
+    
+    ollama_url_var = tk.StringVar(value=app_config.get("ollama_url", "http://localhost:11434"))
+    
+    ollama_url_entry = tk.Entry(
+        ollama_url_inner,
+        textvariable=ollama_url_var,
+        font=(get_system_font(), 10),
+        bg=light_gray,
+        fg=text_color,
+        relief=tk.FLAT
+    )
+    ollama_url_entry.pack(fill=tk.X, padx=12, pady=10)
+    
+    ollama_url_hint = tk.Label(
+        ollama_section,
+        text="e.g., http://your-aws-ip:11434 or http://localhost:11434",
+        font=(get_system_font(), 8),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    ollama_url_hint.pack(anchor='w', pady=(2, 8))
+    
+    # Ollama model selection
+    ollama_model_label = tk.Label(
+        ollama_section,
+        text="Ollama Model:",
+        font=(get_system_font(), 9),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    ollama_model_label.pack(anchor='w', pady=(4, 4))
+    
+    ollama_model_frame = tk.Frame(ollama_section, bg=border_color)
+    ollama_model_frame.pack(fill=tk.X)
+    
+    ollama_model_inner = tk.Frame(ollama_model_frame, bg=light_gray)
+    ollama_model_inner.pack(fill=tk.X, padx=1, pady=1)
+    
+    ollama_model_listbox_frame = tk.Frame(ollama_model_inner, bg=light_gray)
+    ollama_model_listbox_frame.pack(fill=tk.X)
+    
+    ollama_current_model_var = tk.StringVar(value=app_config.get("ollama_model", "Select a model..."))
+    
+    ollama_model_display = tk.Label(
+        ollama_model_listbox_frame,
+        textvariable=ollama_current_model_var,
+        font=(get_system_font(), 10),
+        bg=light_gray,
+        fg=text_color,
+        anchor='w',
+        padx=12,
+        pady=10,
+        cursor='hand2'
+    )
+    ollama_model_display.pack(fill=tk.X)
+    
+    ollama_arrow_label = tk.Label(
+        ollama_model_listbox_frame,
+        text="▼",
+        font=(get_system_font(), 8),
+        bg=light_gray,
+        fg=secondary_text
+    )
+    ollama_arrow_label.place(relx=0.95, rely=0.5, anchor='center')
+    
+    # Dropdown list for Ollama models
+    ollama_dropdown_list_frame = tk.Frame(ollama_section, bg=border_color)
+    ollama_dropdown_listbox = tk.Listbox(
+        ollama_dropdown_list_frame,
+        font=(get_system_font(), 9),
+        bg=light_gray,
+        fg=text_color,
+        selectbackground=accent_color,
+        selectforeground='white',
+        relief=tk.FLAT,
+        highlightthickness=0,
+        height=5,
+        activestyle='none'
+    )
+    
+    ollama_dropdown_scrollbar = tk.Scrollbar(ollama_dropdown_list_frame, orient="vertical", command=ollama_dropdown_listbox.yview)
+    ollama_dropdown_listbox.configure(yscrollcommand=ollama_dropdown_scrollbar.set)
+    
+    ollama_dropdown_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1, pady=1)
+    ollama_dropdown_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    ollama_dropdown_visible = [False]
+    
+    def populate_ollama_models():
+        ollama_dropdown_listbox.delete(0, tk.END)
+        if ollama_available_models:
+            for m in ollama_available_models:
+                ollama_dropdown_listbox.insert(tk.END, m)
+        else:
+            ollama_dropdown_listbox.insert(tk.END, "No models found - Click refresh")
+    
+    def toggle_ollama_dropdown(e=None):
+        if ollama_dropdown_visible[0]:
+            ollama_dropdown_list_frame.pack_forget()
+            ollama_dropdown_visible[0] = False
+        else:
+            ollama_dropdown_list_frame.pack(fill=tk.X, pady=(2, 0))
+            ollama_dropdown_visible[0] = True
+    
+    def select_ollama_model(e=None):
+        selection = ollama_dropdown_listbox.curselection()
+        if selection:
+            selected = ollama_dropdown_listbox.get(selection[0])
+            if selected != "No models found - Click refresh":
+                ollama_current_model_var.set(selected)
+                toggle_ollama_dropdown()
+    
+    ollama_model_display.bind('<Button-1>', toggle_ollama_dropdown)
+    ollama_arrow_label.bind('<Button-1>', toggle_ollama_dropdown)
+    ollama_dropdown_listbox.bind('<Double-1>', select_ollama_model)
+    ollama_dropdown_listbox.bind('<Return>', select_ollama_model)
+    
+    # Status and refresh buttons
+    ollama_btn_frame = tk.Frame(ollama_section, bg=card_bg)
+    ollama_btn_frame.pack(fill=tk.X, pady=(8, 0))
+    
+    ollama_status = tk.Label(
+        ollama_btn_frame,
+        text="",
+        font=(get_system_font(), 9),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    ollama_status.pack(side=tk.LEFT)
+    
+    def test_ollama_connection():
+        """Test connection to Ollama and fetch models."""
+        ollama_refresh_btn.config(text="⏳ Connecting...")
+        settings_window.update()
+        
+        url = ollama_url_var.get().strip()
+        models = fetch_ollama_models(url)
+        
+        if models:
+            ollama_status.config(text=f"✓ Connected - {len(models)} models found", fg=green_accent)
+            populate_ollama_models()
+            # Auto-select first model if none selected
+            current = ollama_current_model_var.get()
+            if not current or current == "Select a model..." or current not in models:
+                ollama_current_model_var.set(models[0])
+        else:
+            ollama_status.config(text="✗ Connection failed", fg='#ef4444')
+            ollama_dropdown_listbox.delete(0, tk.END)
+            ollama_dropdown_listbox.insert(tk.END, "No models found - Click refresh")
+        
+        ollama_refresh_btn.config(text="🔄 Refresh Models")
+    
+    ollama_refresh_btn = tk.Button(
+        ollama_btn_frame,
+        text="🔄 Refresh Models",
+        command=test_ollama_connection,
+        font=(get_system_font(), 9),
+        bg=accent_color,
+        fg='white',
+        relief=tk.FLAT,
+        padx=10,
+        pady=4,
+        cursor='hand2',
+        borderwidth=0,
+        activebackground=theme['btn_hover'],
+        activeforeground='white'
+    )
+    ollama_refresh_btn.pack(side=tk.RIGHT)
+    
+    # Populate with existing models if any
+    if ollama_available_models:
+        populate_ollama_models()
+    
+    # Register Ollama widgets for theme updates
+    themed_widgets.extend([
+        {'widget': ollama_section, 'type': 'bg_only'},
+        {'widget': ollama_header, 'type': 'bg_only'},
+        {'widget': ollama_icon, 'type': 'text'},
+        {'widget': ollama_title, 'type': 'text'},
+        {'widget': ollama_desc, 'type': 'secondary'},
+        {'widget': ollama_enable_frame, 'type': 'bg_only'},
+        {'widget': ollama_cb_inner, 'type': 'light'},
+        {'widget': ollama_cb_check, 'type': 'light'},
+        {'widget': ollama_enable_label, 'type': 'text'},
+        {'widget': ollama_url_label, 'type': 'secondary'},
+        {'widget': ollama_url_inner, 'type': 'light'},
+        {'widget': ollama_url_entry, 'type': 'dropdown_text'},
+        {'widget': ollama_url_hint, 'type': 'secondary'},
+        {'widget': ollama_model_label, 'type': 'secondary'},
+        {'widget': ollama_model_inner, 'type': 'light'},
+        {'widget': ollama_model_listbox_frame, 'type': 'light'},
+        {'widget': ollama_model_display, 'type': 'dropdown_text'},
+        {'widget': ollama_arrow_label, 'type': 'secondary'},
+        {'widget': ollama_btn_frame, 'type': 'bg_only'},
+        {'widget': ollama_status, 'type': 'secondary'},
+        {'widget': ollama_refresh_btn, 'type': 'button_accent'},
     ])
     
     # === MODEL SELECTION SECTION ===
@@ -1964,7 +2640,7 @@ def show_settings_popup():
                 # Redraw main canvas background with rounded corners
                 widget.delete("all")
                 radius = 16
-                x1, y1, x2, y2 = 0, 0, 450, 550
+                x1, y1, x2, y2 = 0, 0, 450, 750
                 widget.create_arc(x1, y1, x1+radius*2, y1+radius*2, start=90, extent=90, fill=card_bg, outline=card_bg)
                 widget.create_arc(x2-radius*2, y1, x2, y1+radius*2, start=0, extent=90, fill=card_bg, outline=card_bg)
                 widget.create_arc(x1, y2-radius*2, x1+radius*2, y2, start=180, extent=90, fill=card_bg, outline=card_bg)
@@ -1972,7 +2648,7 @@ def show_settings_popup():
                 widget.create_rectangle(x1+radius, y1, x2-radius, y2, fill=card_bg, outline=card_bg)
                 widget.create_rectangle(x1, y1+radius, x2, y2-radius, fill=card_bg, outline=card_bg)
                 # Recreate the main card window
-                widget.create_window(225, 275, window=main_card, width=446, height=546)
+                widget.create_window(225, 375, window=main_card, width=446, height=746)
             elif widget_type == 'canvas':
                 widget.config(bg=card_bg)
             elif widget_type == 'dropdown_text':
@@ -2062,6 +2738,175 @@ def show_settings_popup():
     
     options_title = tk.Label(options_header, text="Options", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
     options_title.pack(side=tk.LEFT, padx=(6, 0))
+    
+    # Question Mode selector
+    mode_frame = tk.Frame(options_section, bg=card_bg)
+    mode_frame.pack(fill=tk.X, pady=(10, 0))
+    
+    mode_label = tk.Label(mode_frame, text="Question Mode:", font=(get_system_font(), 10), bg=card_bg, fg=text_color)
+    mode_label.pack(side=tk.LEFT)
+    
+    mode_var = tk.StringVar(value=app_config.get("question_mode", "mcq"))
+    
+    mode_buttons_frame = tk.Frame(mode_frame, bg=card_bg)
+    mode_buttons_frame.pack(side=tk.LEFT, padx=(10, 0))
+    
+    def create_mode_button(parent, text, value, icon):
+        is_selected = mode_var.get() == value
+        btn_frame = tk.Frame(parent, bg=accent_color if is_selected else light_gray, cursor='hand2')
+        btn_frame.pack(side=tk.LEFT, padx=(0, 8))
+        
+        btn_inner = tk.Frame(btn_frame, bg=light_gray)
+        btn_inner.pack(padx=2, pady=2)
+        
+        btn_content = tk.Frame(btn_inner, bg=light_gray)
+        btn_content.pack(padx=12, pady=6)
+        
+        btn_icon = tk.Label(btn_content, text=icon, font=(get_system_font(), 10), bg=light_gray, fg=text_color)
+        btn_icon.pack(side=tk.LEFT)
+        
+        btn_text = tk.Label(btn_content, text=text, font=(get_system_font(), 9), bg=light_gray, fg=text_color)
+        btn_text.pack(side=tk.LEFT, padx=(4, 0))
+        
+        def on_click(e=None):
+            mode_var.set(value)
+            # Update all mode button states
+            for child in mode_buttons_frame.winfo_children():
+                child.config(bg=light_gray)
+            btn_frame.config(bg=accent_color)
+        
+        for widget in [btn_frame, btn_inner, btn_content, btn_icon, btn_text]:
+            widget.bind('<Button-1>', on_click)
+        
+        # Register for theme updates
+        themed_widgets.extend([
+            {'widget': btn_inner, 'type': 'light'},
+            {'widget': btn_content, 'type': 'light'},
+            {'widget': btn_icon, 'type': 'dropdown_text'},
+            {'widget': btn_text, 'type': 'dropdown_text'},
+        ])
+        
+        return btn_frame
+    
+    mcq_btn = create_mode_button(mode_buttons_frame, "MCQ", "mcq", "📝")
+    coding_btn = create_mode_button(mode_buttons_frame, "Coding", "coding", "💻")
+    
+    mode_desc = tk.Label(
+        options_section,
+        text="MCQ: For multiple choice questions | Coding: For LeetCode-style problems (code only)",
+        font=(get_system_font(), 8),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    mode_desc.pack(anchor='w', padx=(0, 0), pady=(4, 0))
+    
+    # Programming Language selector (for coding mode)
+    lang_frame = tk.Frame(options_section, bg=card_bg)
+    lang_frame.pack(fill=tk.X, pady=(10, 0))
+    
+    lang_label = tk.Label(lang_frame, text="Programming Language:", font=(get_system_font(), 10), bg=card_bg, fg=text_color)
+    lang_label.pack(side=tk.LEFT)
+    
+    LANGUAGES = ["Python", "Java", "C++", "JavaScript", "TypeScript", "Go", "Rust", "C#", "C", "Ruby", "Swift", "Kotlin"]
+    lang_var = tk.StringVar(value=app_config.get("programming_language", "Python"))
+    
+    lang_dropdown_frame = tk.Frame(lang_frame, bg=border_color)
+    lang_dropdown_frame.pack(side=tk.LEFT, padx=(10, 0))
+    
+    lang_dropdown_inner = tk.Frame(lang_dropdown_frame, bg=light_gray)
+    lang_dropdown_inner.pack(padx=1, pady=1)
+    
+    lang_display = tk.Label(
+        lang_dropdown_inner,
+        textvariable=lang_var,
+        font=(get_system_font(), 10),
+        bg=light_gray,
+        fg=text_color,
+        padx=12,
+        pady=6,
+        cursor='hand2',
+        width=12,
+        anchor='w'
+    )
+    lang_display.pack(side=tk.LEFT)
+    
+    lang_arrow = tk.Label(
+        lang_dropdown_inner,
+        text="▼",
+        font=(get_system_font(), 8),
+        bg=light_gray,
+        fg=secondary_text
+    )
+    lang_arrow.pack(side=tk.LEFT, padx=(0, 8))
+    
+    # Language dropdown list
+    lang_dropdown_list = tk.Frame(options_section, bg=border_color)
+    lang_listbox = tk.Listbox(
+        lang_dropdown_list,
+        font=(get_system_font(), 9),
+        bg=light_gray,
+        fg=text_color,
+        selectbackground=accent_color,
+        selectforeground='white',
+        relief=tk.FLAT,
+        highlightthickness=0,
+        height=6,
+        activestyle='none'
+    )
+    
+    for lang in LANGUAGES:
+        lang_listbox.insert(tk.END, lang)
+    
+    lang_scrollbar = tk.Scrollbar(lang_dropdown_list, orient="vertical", command=lang_listbox.yview)
+    lang_listbox.configure(yscrollcommand=lang_scrollbar.set)
+    
+    lang_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1, pady=1)
+    lang_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    lang_dropdown_visible = [False]
+    
+    def toggle_lang_dropdown(e=None):
+        if lang_dropdown_visible[0]:
+            lang_dropdown_list.pack_forget()
+            lang_dropdown_visible[0] = False
+        else:
+            lang_dropdown_list.pack(fill=tk.X, pady=(2, 0))
+            lang_dropdown_visible[0] = True
+    
+    def select_lang(e=None):
+        selection = lang_listbox.curselection()
+        if selection:
+            selected = lang_listbox.get(selection[0])
+            lang_var.set(selected)
+            toggle_lang_dropdown()
+    
+    lang_display.bind('<Button-1>', toggle_lang_dropdown)
+    lang_arrow.bind('<Button-1>', toggle_lang_dropdown)
+    lang_listbox.bind('<Double-1>', select_lang)
+    lang_listbox.bind('<Return>', select_lang)
+    
+    lang_hint = tk.Label(
+        options_section,
+        text="Language used when Coding mode is active",
+        font=(get_system_font(), 8),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    lang_hint.pack(anchor='w', pady=(4, 0))
+    
+    # Register mode and language widgets for theme updates
+    themed_widgets.extend([
+        {'widget': mode_frame, 'type': 'bg_only'},
+        {'widget': mode_label, 'type': 'text'},
+        {'widget': mode_buttons_frame, 'type': 'bg_only'},
+        {'widget': mode_desc, 'type': 'secondary'},
+        {'widget': lang_frame, 'type': 'bg_only'},
+        {'widget': lang_label, 'type': 'text'},
+        {'widget': lang_dropdown_inner, 'type': 'light'},
+        {'widget': lang_display, 'type': 'dropdown_text'},
+        {'widget': lang_arrow, 'type': 'secondary'},
+        {'widget': lang_hint, 'type': 'secondary'},
+    ])
     
     # Checkboxes
     auto_copy_var = tk.BooleanVar(value=app_config.get("auto_copy", False))
@@ -2187,6 +3032,116 @@ def show_settings_popup():
         {'widget': history_spinbox, 'type': 'spinbox'},
     ])
     
+    # === AUTO-TYPE SECTION ===
+    autotype_section = tk.Frame(content_frame, bg=card_bg)
+    autotype_section.pack(fill=tk.X, pady=(0, 20))
+    
+    autotype_header = tk.Frame(autotype_section, bg=card_bg)
+    autotype_header.pack(fill=tk.X)
+    
+    autotype_icon = tk.Label(autotype_header, text="⌨️", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
+    autotype_icon.pack(side=tk.LEFT)
+    
+    autotype_title = tk.Label(autotype_header, text="Auto-Type", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
+    autotype_title.pack(side=tk.LEFT, padx=(6, 0))
+    
+    autotype_desc = tk.Label(
+        autotype_section,
+        text="Automatically type responses at a natural speed",
+        font=(get_system_font(), 9),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    autotype_desc.pack(anchor='w', pady=(4, 8))
+    
+    # Enable auto-type checkbox
+    auto_type_enabled_var = tk.BooleanVar(value=app_config.get("auto_type_enabled", True))
+    
+    autotype_enable_frame = tk.Frame(autotype_section, bg=card_bg)
+    autotype_enable_frame.pack(fill=tk.X, pady=(0, 8))
+    
+    autotype_cb_box = tk.Frame(autotype_enable_frame, bg=border_color, width=20, height=20, cursor='hand2')
+    autotype_cb_box.pack(side=tk.LEFT)
+    autotype_cb_box.pack_propagate(False)
+    
+    autotype_cb_inner = tk.Frame(autotype_cb_box, bg=light_gray)
+    autotype_cb_inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+    
+    autotype_cb_check = tk.Label(autotype_cb_inner, text="", font=(get_system_font(), 10), bg=light_gray, fg=accent_color)
+    autotype_cb_check.pack(expand=True)
+    
+    def update_autotype_checkbox():
+        if auto_type_enabled_var.get():
+            autotype_cb_check.config(text="✓")
+            autotype_cb_box.config(bg=accent_color)
+        else:
+            autotype_cb_check.config(text="")
+            autotype_cb_box.config(bg=border_color)
+    
+    def toggle_autotype_cb(e=None):
+        auto_type_enabled_var.set(not auto_type_enabled_var.get())
+        update_autotype_checkbox()
+    
+    update_autotype_checkbox()
+    
+    for widget in [autotype_cb_box, autotype_cb_inner, autotype_cb_check]:
+        widget.bind('<Button-1>', toggle_autotype_cb)
+    
+    autotype_enable_label = tk.Label(autotype_enable_frame, text="Enable auto-type feature", font=(get_system_font(), 10), bg=card_bg, fg=text_color, cursor='hand2')
+    autotype_enable_label.pack(side=tk.LEFT, padx=(10, 0))
+    autotype_enable_label.bind('<Button-1>', toggle_autotype_cb)
+    
+    # WPM setting
+    wpm_row = tk.Frame(autotype_section, bg=card_bg)
+    wpm_row.pack(fill=tk.X, pady=(4, 0))
+    
+    auto_type_wpm_var = tk.IntVar(value=app_config.get("auto_type_wpm", 30))
+    
+    wpm_label = tk.Label(wpm_row, text="Typing speed (WPM):", font=(get_system_font(), 10), bg=card_bg, fg=text_color)
+    wpm_label.pack(side=tk.LEFT)
+    
+    wpm_spinbox = tk.Spinbox(
+        wpm_row,
+        from_=10,
+        to=200,
+        textvariable=auto_type_wpm_var,
+        width=5,
+        font=(get_system_font(), 10),
+        bg=light_gray,
+        fg=text_color,
+        buttonbackground=light_gray,
+        relief=tk.FLAT,
+        highlightthickness=1,
+        highlightbackground=border_color
+    )
+    wpm_spinbox.pack(side=tk.LEFT, padx=(10, 0))
+    
+    wpm_hint = tk.Label(
+        autotype_section,
+        text=f"Hotkeys: {AUTO_TYPE_HOTKEY} (start/stop), {PAUSE_TYPE_HOTKEY} (pause/resume)",
+        font=(get_system_font(), 8),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    wpm_hint.pack(anchor='w', pady=(8, 0))
+    
+    # Register auto-type section widgets
+    themed_widgets.extend([
+        {'widget': autotype_section, 'type': 'bg_only'},
+        {'widget': autotype_header, 'type': 'bg_only'},
+        {'widget': autotype_icon, 'type': 'text'},
+        {'widget': autotype_title, 'type': 'text'},
+        {'widget': autotype_desc, 'type': 'secondary'},
+        {'widget': autotype_enable_frame, 'type': 'bg_only'},
+        {'widget': autotype_cb_inner, 'type': 'light'},
+        {'widget': autotype_cb_check, 'type': 'light'},
+        {'widget': autotype_enable_label, 'type': 'text'},
+        {'widget': wpm_row, 'type': 'bg_only'},
+        {'widget': wpm_label, 'type': 'text'},
+        {'widget': wpm_spinbox, 'type': 'spinbox'},
+        {'widget': wpm_hint, 'type': 'secondary'},
+    ])
+    
     # === FOOTER WITH SAVE BUTTON ===
     footer = tk.Frame(main_card, bg=card_bg)
     footer.pack(fill=tk.X, padx=24, pady=(0, 20))
@@ -2200,6 +3155,13 @@ def show_settings_popup():
         app_config["api_key"] = new_api_key
         API_KEY = new_api_key
         
+        # Update Ollama config
+        app_config["ollama_enabled"] = ollama_enabled_var.get()
+        app_config["ollama_url"] = ollama_url_var.get().strip()
+        ollama_model_selected = ollama_current_model_var.get()
+        if ollama_model_selected and ollama_model_selected != "Select a model...":
+            app_config["ollama_model"] = ollama_model_selected
+        
         # Update config
         app_config["model"] = model_var.get()
         app_config["theme"] = theme_var.get()
@@ -2207,7 +3169,13 @@ def show_settings_popup():
         app_config["show_explanation"] = show_explanation_var.get()
         app_config["compact_mode"] = compact_mode_var.get()
         app_config["stealth_mode"] = stealth_mode_var.get()
+        app_config["question_mode"] = mode_var.get()
+        app_config["programming_language"] = lang_var.get()
         app_config["max_history"] = max_history_var.get()
+        
+        # Update auto-type settings
+        app_config["auto_type_enabled"] = auto_type_enabled_var.get()
+        app_config["auto_type_wpm"] = auto_type_wpm_var.get()
         
         # Update MAX_HISTORY_ITEMS
         MAX_HISTORY_ITEMS = max_history_var.get()
@@ -2215,12 +3183,13 @@ def show_settings_popup():
         # Save to file
         save_config(app_config)
         
-        # Reconfigure API if key changed
-        if api_key_changed and new_api_key:
-            configure_genai()
-        else:
-            # Reload model if changed
-            reload_model()
+        # Reconfigure API if key changed (only if not using Ollama)
+        if not ollama_enabled_var.get():
+            if api_key_changed and new_api_key:
+                configure_genai()
+            else:
+                # Reload model if changed
+                reload_model()
         
         # pystray dynamically rebuilds menu on each click, no explicit update needed
         
@@ -2375,6 +3344,15 @@ def create_tray_icon():
         """Check if dark theme is active."""
         return app_config.get("theme", "light") == "dark"
     
+    def is_coding_mode():
+        """Check if coding mode is active."""
+        return app_config.get("question_mode", "mcq") == "coding"
+    
+    def on_toggle_mode(icon, item):
+        """Toggle question mode from tray menu."""
+        root.after(0, toggle_question_mode)
+        icon.update_menu()
+    
     def get_history_items():
         """Generate history submenu items."""
         if not answer_history:
@@ -2414,6 +3392,11 @@ def create_tray_icon():
             "Dark Mode",
             on_toggle_theme,
             checked=lambda item: is_dark_theme()
+        ),
+        pystray.MenuItem(
+            f"Coding Mode ({MODE_HOTKEY})",
+            on_toggle_mode,
+            checked=lambda item: is_coding_mode()
         ),
         pystray.MenuItem(
             f"Hide/Show UI ({HIDE_HOTKEY})",
@@ -2526,6 +3509,10 @@ if __name__ == "__main__":
     keyboard.add_hotkey(THEME_HOTKEY, toggle_theme)
     keyboard.add_hotkey(HISTORY_HOTKEY, show_history_popup)
     keyboard.add_hotkey(SETTINGS_HOTKEY, show_settings_popup)
+    keyboard.add_hotkey(MODE_HOTKEY, toggle_question_mode)
+    keyboard.add_hotkey(COPY_HOTKEY, copy_last_response)
+    keyboard.add_hotkey(AUTO_TYPE_HOTKEY, auto_type_last_response)
+    keyboard.add_hotkey(PAUSE_TYPE_HOTKEY, toggle_auto_type_pause)
     keyboard.add_hotkey(QUIT_HOTKEY, quit_application)
     
     # Start system tray icon in separate thread
@@ -2535,8 +3522,9 @@ if __name__ == "__main__":
     # Hide console window (runs minimized in system tray)
     hide_console()
     
-    # If no API key is set, show settings on first run
-    if not API_KEY:
+    # If no API key is set and Ollama is not enabled, show settings on first run
+    ollama_enabled = app_config.get("ollama_enabled", False)
+    if not API_KEY and not ollama_enabled:
         logger.warning("No API key found. Opening settings...")
         root.after(500, show_settings_popup)
     

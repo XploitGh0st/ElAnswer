@@ -13,6 +13,9 @@ keyboard>=0.13.5
 # System tray icon
 pystray>=0.19.0
 
+# HTTP requests (for Ollama API)
+requests>=2.28.0
+
 # Build tools (for creating executable)
 pyinstaller>=6.0.0
 
