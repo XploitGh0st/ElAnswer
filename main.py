@@ -382,6 +382,9 @@ AUTO_TYPE_HOTKEY = "ctrl+alt+a"
 # The Hotkey combination to pause/resume auto-typing
 PAUSE_TYPE_HOTKEY = "ctrl+alt+="
 
+# The Hotkey combination to open chat window
+CHAT_HOTKEY = "ctrl+alt+g"
+
 # Maximum number of history items to keep
 MAX_HISTORY_ITEMS = 10
 
@@ -394,12 +397,17 @@ loading_indicator = None  # Loading indicator window
 logo_image = None  # Store logo image reference
 tray_icon = None  # System tray icon
 settings_window = None  # Settings window
+chat_window = None  # Chat window
 available_models = []  # Available Gemini models
 model = None  # Current Gemini model instance
 
 # Ollama globals
 ollama_available_models = []  # Available Ollama models
 ollama_connected = False  # Track Ollama connection status
+
+# Qwen globals
+qwen_available_models = []  # Available Qwen models
+qwen_connected = False  # Track Qwen connection status
 
 # Auto-type globals
 auto_type_active = False  # Is auto-typing currently in progress
@@ -452,7 +460,7 @@ def load_config():
         "popup_x": 200,
         "popup_y": 80,
         "theme": "light",
-        "model": "models/gemini-3-flash-preview",
+        "model": "models/gemini-2.0-flash",
         "max_history": 10,
         "auto_copy": False,
         "show_explanation": True,
@@ -462,11 +470,15 @@ def load_config():
         "programming_language": "Python",  # Default language for coding mode
         # Auto-type settings
         "auto_type_enabled": True,
-        "auto_type_wpm": 60,  # Words per minute for auto-typing
+        "auto_type_wpm": 150,  # Words per minute for auto-typing
         # Ollama settings
         "ollama_enabled": False,
         "ollama_url": "http://localhost:11434",
-        "ollama_model": ""
+        "ollama_model": "",
+        # Qwen settings
+        "qwen_enabled": False,
+        "qwen_api_key": "",
+        "qwen_model": "qwen3-coder-plus"
     }
     try:
         if os.path.exists(CONFIG_PATH):
@@ -568,9 +580,12 @@ def configure_genai():
     """Configures the Gemini API."""
     global available_models, API_KEY, model
     
-    # Skip Gemini configuration if Ollama is enabled
+    # Skip Gemini configuration if Ollama or Qwen is enabled
     if app_config.get("ollama_enabled", False):
         logger.info("Ollama is enabled, skipping Gemini configuration.")
+        return None
+    if app_config.get("qwen_enabled", False):
+        logger.info("Qwen is enabled, skipping Gemini configuration.")
         return None
     
     # Reload API key from config in case it was updated
@@ -587,7 +602,7 @@ def configure_genai():
         threading.Thread(target=fetch_available_models, daemon=True).start()
         
         # Use saved model or default
-        selected_model = app_config.get("model", "models/gemini-3-flash-preview")
+        selected_model = app_config.get("model", "models/gemini-2.0-flash")
         model = genai.GenerativeModel(selected_model)
         return model
     except Exception as e:
@@ -598,6 +613,23 @@ def configure_genai():
 def fetch_available_models():
     """Fetch available models from the API."""
     global available_models
+    
+    # Don't fetch if no API key is configured or if using Ollama/Qwen
+    if app_config.get("ollama_enabled", False) or app_config.get("qwen_enabled", False):
+        return
+    
+    api_key = app_config.get("api_key", "") or os.environ.get("GEMINI_API_KEY", "")
+    if not api_key or api_key == "YOUR_GEMINI_API_KEY_HERE":
+        # Use fallback models when no API key is set
+        available_models = [
+            "models/gemini-2.0-flash",
+            "models/gemini-2.0-flash-lite",
+            "models/gemini-1.5-flash",
+            "models/gemini-1.5-pro",
+            "models/gemini-pro"
+        ]
+        return
+    
     try:
         models_list = genai.list_models()
         # Filter for models that support generateContent
@@ -626,19 +658,27 @@ def fetch_available_models():
         logger.warning(f"Could not fetch models: {e}")
         # Fallback models
         available_models = [
-            "models/gemini-2.5-flash",
-            "models/gemini-2.5-pro-preview-05-06",
+            "models/gemini-2.0-flash",
+            "models/gemini-2.0-flash-lite",
             "models/gemini-1.5-flash",
             "models/gemini-1.5-pro",
-            "models/gemini-pro",
-            "models/gemini-pro-vision"
+            "models/gemini-pro"
         ]
 
 
 def reload_model():
     """Reload the model with current settings."""
     global model
-    selected_model = app_config.get("model", "models/gemini-3-flash-preview")
+    
+    # Skip if using Ollama/Qwen or no API key
+    if app_config.get("ollama_enabled", False) or app_config.get("qwen_enabled", False):
+        return
+    
+    api_key = app_config.get("api_key", "") or os.environ.get("GEMINI_API_KEY", "")
+    if not api_key or api_key == "YOUR_GEMINI_API_KEY_HERE":
+        return
+    
+    selected_model = app_config.get("model", "models/gemini-2.0-flash")
     try:
         model = genai.GenerativeModel(selected_model)
         logger.info(f"Model changed to: {selected_model}")
@@ -735,6 +775,241 @@ def query_ollama(image, prompt):
         raise Exception("Ollama request timed out. The model may be taking too long to respond.")
     except Exception as e:
         raise Exception(f"Ollama error: {str(e)}")
+
+
+# ============== QWEN FUNCTIONS ============== #
+
+def fetch_qwen_models(qwen_api_key=None):
+    """Fetch available models from Qwen API."""
+    global qwen_available_models, qwen_connected
+    
+    if qwen_api_key is None:
+        qwen_api_key = app_config.get("qwen_api_key", "")
+    
+    if not qwen_api_key:
+        logger.warning("No Qwen API key provided")
+        qwen_connected = False
+        return []
+    
+    try:
+        # Qwen/DashScope models API
+        headers = {
+            "Authorization": f"Bearer {qwen_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.get(
+            "https://dashscope.aliyuncs.com/api/v1/models",
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            models = data.get("data", [])
+            # Filter for vision models (qwen-vl)
+            qwen_available_models = [
+                m.get("id", "") for m in models 
+                if m.get("id") and ("qwen-vl" in m.get("id", "").lower() or "qwen2-vl" in m.get("id", "").lower())
+            ]
+            
+            # If no vision models found, provide common defaults
+            if not qwen_available_models:
+                qwen_available_models = [
+                    "qwen-vl-max",
+                    "qwen-vl-plus", 
+                    "qwen2-vl-7b-instruct",
+                    "qwen-vl-max-latest",
+                    "Qwen3-Coder-Plus"
+                ]
+            
+            qwen_connected = True
+            logger.info(f"Qwen connected. Found {len(qwen_available_models)} vision models.")
+            return qwen_available_models
+        elif response.status_code == 401:
+            logger.warning("Qwen API key is invalid")
+            qwen_connected = False
+            return []
+        else:
+            logger.warning(f"Qwen returned status {response.status_code}")
+            # Return default models even if API call fails
+            qwen_available_models = [
+                "qwen-vl-max",
+                "qwen-vl-plus",
+                "qwen2-vl-7b-instruct",
+                "qwen-vl-max-latest",
+                "Qwen3-Coder-Plus"
+            ]
+            qwen_connected = True
+            return qwen_available_models
+    except requests.exceptions.ConnectionError:
+        logger.warning("Could not connect to Qwen API")
+        qwen_connected = False
+        # Return default models for offline selection
+        qwen_available_models = [
+            "qwen-vl-max",
+            "qwen-vl-plus",
+            "qwen2-vl-7b-instruct",
+            "qwen-vl-max-latest",
+            "Qwen3-Coder-Plus"
+        ]
+        return qwen_available_models
+    except requests.exceptions.Timeout:
+        logger.warning("Qwen API connection timed out")
+        qwen_connected = False
+        qwen_available_models = [
+            "qwen-vl-max",
+            "qwen-vl-plus",
+            "qwen2-vl-7b-instruct",
+            "qwen-vl-max-latest",
+            "Qwen3-Coder-Plus"
+        ]
+        return qwen_available_models
+    except Exception as e:
+        logger.warning(f"Error fetching Qwen models: {e}")
+        qwen_connected = False
+        qwen_available_models = [
+            "qwen-vl-max",
+            "qwen-vl-plus",
+            "qwen2-vl-7b-instruct",
+            "qwen-vl-max-latest",
+            "Qwen3-Coder-Plus"
+        ]
+        return qwen_available_models
+
+
+def query_qwen(image, prompt):
+    """Send an image and/or prompt to Qwen for analysis. Image is optional for text-only models."""
+    global app_config
+    
+    qwen_api_key = app_config.get("qwen_api_key", "")
+    qwen_model = app_config.get("qwen_model", "qwen-vl-max")
+    
+    if not qwen_api_key:
+        raise Exception("No Qwen API key configured. Please add your API key in Settings.")
+    
+    if not qwen_model:
+        raise Exception("No Qwen model selected. Please select a model in Settings.")
+    
+    # Check if this is a vision model (requires image)
+    is_vision_model = "vl" in qwen_model.lower()
+    
+    try:
+        # Prepare the request headers
+        headers = {
+            "Authorization": f"Bearer {qwen_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        if is_vision_model and image:
+            # Vision model with image - use multimodal endpoint
+            buffered = io.BytesIO()
+            image.save(buffered, format="PNG")
+            image_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            
+            payload = {
+                "model": qwen_model,
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "image": f"data:image/png;base64,{image_base64}"
+                                },
+                                {
+                                    "text": prompt
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "parameters": {}
+            }
+            api_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        elif is_vision_model and not image:
+            raise Exception(f"Model {qwen_model} requires an image. Please attach a screenshot.")
+        else:
+            # Text-only models (including Qwen3-Coder-Plus) - use text generation endpoint
+            # Normalize model name to lowercase
+            model_name = qwen_model.lower()
+            payload = {
+                "model": model_name,
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+                },
+                "parameters": {}
+            }
+            api_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+        
+        # Send request to Qwen DashScope API
+        response = requests.post(
+            api_url,
+            headers=headers,
+            json=payload,
+            timeout=120  # 2 minute timeout for generation
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Handle OpenAI-compatible format (Qwen3 models)
+            if "choices" in data:
+                choices = data.get("choices", [])
+                if choices:
+                    message = choices[0].get("message", {})
+                    content = message.get("content", "")
+                    if content:
+                        return content
+                return "No response received from Qwen"
+            
+            # Handle DashScope format
+            output = data.get("output", {})
+            
+            # Text generation format
+            if "text" in output:
+                return output["text"]
+            
+            # Multimodal format
+            choices = output.get("choices", [])
+            if choices:
+                message = choices[0].get("message", {})
+                content = message.get("content", [])
+                if isinstance(content, str):
+                    return content
+                if content:
+                    # Content can be a list of text/image parts
+                    text_parts = [c.get("text", "") for c in content if c.get("text")]
+                    return " ".join(text_parts) if text_parts else "No response received from Qwen"
+            return "No response received from Qwen"
+        elif response.status_code == 401:
+            raise Exception("Invalid Qwen API key. Please check your API key in Settings.")
+        elif response.status_code == 429:
+            raise Exception("Qwen API rate limit exceeded. Please try again later.")
+        else:
+            error_msg = f"Qwen returned status {response.status_code}"
+            try:
+                error_data = response.json()
+                if "message" in error_data:
+                    error_msg = f"Qwen error: {error_data['message']}"
+            except:
+                pass
+            raise Exception(error_msg)
+            
+    except requests.exceptions.ConnectionError:
+        raise Exception("Could not connect to Qwen API. Please check your internet connection.")
+    except requests.exceptions.Timeout:
+        raise Exception("Qwen request timed out. The model may be taking too long to respond.")
+    except Exception as e:
+        if "Qwen" in str(e):
+            raise
+        raise Exception(f"Qwen error: {str(e)}")
+
 
 def show_loading_indicator():
     """Shows a small blinking logo at the bottom left while Gemini is processing."""
@@ -1228,19 +1503,34 @@ def show_answer_popup(answer_text):
     popup_window.after(500, pulse_status)
     
 def analyze_screen():
-    """Captures screen, sends to Gemini or Ollama, and displays answer in popup."""
+    """Captures screen, sends to Gemini, Ollama, or Qwen, and displays answer in popup."""
     global app_config, model
     
-    # Check if using Ollama or Gemini
+    # Check which provider is enabled
     use_ollama = app_config.get("ollama_enabled", False)
+    use_qwen = app_config.get("qwen_enabled", False)
     
-    if use_ollama:
+    if use_qwen:
+        # Validate Qwen configuration
+        qwen_api_key = app_config.get("qwen_api_key", "")
+        qwen_model = app_config.get("qwen_model", "")
+        if not qwen_api_key:
+            logger.warning("No Qwen API key configured. Opening settings...")
+            root.after(0, show_settings_popup)
+            return
+        if not qwen_model:
+            logger.warning("No Qwen model selected. Opening settings...")
+            root.after(0, show_settings_popup)
+            return
+        backend_name = "Qwen"
+    elif use_ollama:
         # Validate Ollama configuration
         ollama_model = app_config.get("ollama_model", "")
         if not ollama_model:
             logger.warning("No Ollama model selected. Opening settings...")
             root.after(0, show_settings_popup)
             return
+        backend_name = "Ollama"
     else:
         # Check if API key is configured for Gemini
         if not API_KEY:
@@ -1249,7 +1539,7 @@ def analyze_screen():
             return
         
         # Check if model is configured
-        selected_model = app_config.get("model", "models/gemini-3-flash-preview")
+        selected_model = app_config.get("model", "models/gemini-2.0-flash")
         current_model_name = getattr(model, "model_name", None) or getattr(model, "_model", None)
         if (not model) or (current_model_name and current_model_name != selected_model):
             logger.info(f"Model not configured or outdated. Loading: {selected_model}")
@@ -1258,8 +1548,8 @@ def analyze_screen():
             logger.error("Failed to configure model. Please check your API key and model.")
             root.after(0, show_settings_popup)
             return
+        backend_name = "Gemini"
     
-    backend_name = "Ollama" if use_ollama else "Gemini"
     logger.info(f"Hotkey detected! Capturing screen (using {backend_name})...")
     
     # Show loading indicator on main thread
@@ -1320,7 +1610,9 @@ def analyze_screen():
                 )
 
             # 4. Send to appropriate backend
-            if use_ollama:
+            if use_qwen:
+                answer = query_qwen(screenshot, prompt)
+            elif use_ollama:
                 answer = query_ollama(screenshot, prompt)
             else:
                 response = model.generate_content([prompt, screenshot])
@@ -2122,64 +2414,180 @@ def show_settings_popup():
         {'widget': save_key_btn, 'type': 'button_accent'},
     ])
     
-    # === OLLAMA SECTION ===
+    # === AI PROVIDER TOGGLE SECTION ===
+    provider_section = tk.Frame(content_frame, bg=card_bg)
+    provider_section.pack(fill=tk.X, pady=(0, 20))
+    
+    provider_header = tk.Frame(provider_section, bg=card_bg)
+    provider_header.pack(fill=tk.X)
+    
+    provider_icon = tk.Label(provider_header, text="🤖", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
+    provider_icon.pack(side=tk.LEFT)
+    
+    provider_title = tk.Label(provider_header, text="AI Provider", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
+    provider_title.pack(side=tk.LEFT, padx=(6, 0))
+    
+    provider_desc = tk.Label(
+        provider_section,
+        text="Select which AI service to use for analysis",
+        font=(get_system_font(), 9),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    provider_desc.pack(anchor='w', pady=(4, 8))
+    
+    # Provider toggle variable - now uses string for 3-way toggle
+    def get_current_provider():
+        if app_config.get("qwen_enabled", False):
+            return "qwen"
+        elif app_config.get("ollama_enabled", False):
+            return "ollama"
+        return "gemini"
+    
+    provider_var = tk.StringVar(value=get_current_provider())
+    
+    # Toggle switch container
+    toggle_container = tk.Frame(provider_section, bg=card_bg)
+    toggle_container.pack(fill=tk.X, pady=(0, 12))
+    
+    # Create toggle switch buttons
+    toggle_frame = tk.Frame(toggle_container, bg=border_color)
+    toggle_frame.pack(anchor='w')
+    
+    toggle_inner = tk.Frame(toggle_frame, bg=light_gray)
+    toggle_inner.pack(padx=1, pady=1)
+    
+    # Gemini button
+    gemini_btn = tk.Frame(toggle_inner, bg=accent_color if provider_var.get() == "gemini" else light_gray, cursor='hand2')
+    gemini_btn.pack(side=tk.LEFT)
+    
+    gemini_content = tk.Frame(gemini_btn, bg=gemini_btn.cget('bg'))
+    gemini_content.pack(padx=16, pady=8)
+    
+    gemini_icon = tk.Label(gemini_content, text="✨", font=(get_system_font(), 10), bg=gemini_btn.cget('bg'), 
+                           fg='white' if provider_var.get() == "gemini" else text_color)
+    gemini_icon.pack(side=tk.LEFT)
+    
+    gemini_text = tk.Label(gemini_content, text="Gemini", font=(get_system_font(), 10, 'bold'), 
+                           bg=gemini_btn.cget('bg'), fg='white' if provider_var.get() == "gemini" else text_color)
+    gemini_text.pack(side=tk.LEFT, padx=(4, 0))
+    
+    # Ollama button
+    ollama_btn = tk.Frame(toggle_inner, bg=accent_color if provider_var.get() == "ollama" else light_gray, cursor='hand2')
+    ollama_btn.pack(side=tk.LEFT)
+    
+    ollama_content = tk.Frame(ollama_btn, bg=ollama_btn.cget('bg'))
+    ollama_content.pack(padx=16, pady=8)
+    
+    ollama_icon_lbl = tk.Label(ollama_content, text="🦙", font=(get_system_font(), 10), bg=ollama_btn.cget('bg'),
+                               fg='white' if provider_var.get() == "ollama" else text_color)
+    ollama_icon_lbl.pack(side=tk.LEFT)
+    
+    ollama_text = tk.Label(ollama_content, text="Ollama", font=(get_system_font(), 10, 'bold'),
+                           bg=ollama_btn.cget('bg'), fg='white' if provider_var.get() == "ollama" else text_color)
+    ollama_text.pack(side=tk.LEFT, padx=(4, 0))
+    
+    # Qwen button
+    qwen_btn = tk.Frame(toggle_inner, bg=accent_color if provider_var.get() == "qwen" else light_gray, cursor='hand2')
+    qwen_btn.pack(side=tk.LEFT)
+    
+    qwen_content = tk.Frame(qwen_btn, bg=qwen_btn.cget('bg'))
+    qwen_content.pack(padx=16, pady=8)
+    
+    qwen_icon_lbl = tk.Label(qwen_content, text="🌟", font=(get_system_font(), 10), bg=qwen_btn.cget('bg'),
+                             fg='white' if provider_var.get() == "qwen" else text_color)
+    qwen_icon_lbl.pack(side=tk.LEFT)
+    
+    qwen_text = tk.Label(qwen_content, text="Qwen", font=(get_system_font(), 10, 'bold'),
+                         bg=qwen_btn.cget('bg'), fg='white' if provider_var.get() == "qwen" else text_color)
+    qwen_text.pack(side=tk.LEFT, padx=(4, 0))
+    
+    def update_provider_toggle():
+        """Update toggle switch visual state for 3-way toggle."""
+        current = provider_var.get()
+        
+        # Reset all to inactive
+        for btn, content, icon, text_lbl in [
+            (gemini_btn, gemini_content, gemini_icon, gemini_text),
+            (ollama_btn, ollama_content, ollama_icon_lbl, ollama_text),
+            (qwen_btn, qwen_content, qwen_icon_lbl, qwen_text)
+        ]:
+            btn.config(bg=light_gray)
+            content.config(bg=light_gray)
+            icon.config(bg=light_gray, fg=text_color)
+            text_lbl.config(bg=light_gray, fg=text_color)
+        
+        # Activate selected
+        if current == "gemini":
+            gemini_btn.config(bg=accent_color)
+            gemini_content.config(bg=accent_color)
+            gemini_icon.config(bg=accent_color, fg='white')
+            gemini_text.config(bg=accent_color, fg='white')
+        elif current == "ollama":
+            ollama_btn.config(bg=accent_color)
+            ollama_content.config(bg=accent_color)
+            ollama_icon_lbl.config(bg=accent_color, fg='white')
+            ollama_text.config(bg=accent_color, fg='white')
+        elif current == "qwen":
+            qwen_btn.config(bg=accent_color)
+            qwen_content.config(bg=accent_color)
+            qwen_icon_lbl.config(bg=accent_color, fg='white')
+            qwen_text.config(bg=accent_color, fg='white')
+    
+    def select_gemini(e=None):
+        provider_var.set("gemini")
+        update_provider_toggle()
+    
+    def select_ollama(e=None):
+        provider_var.set("ollama")
+        update_provider_toggle()
+    
+    def select_qwen(e=None):
+        provider_var.set("qwen")
+        update_provider_toggle()
+    
+    # Bind click events
+    for widget in [gemini_btn, gemini_content, gemini_icon, gemini_text]:
+        widget.bind('<Button-1>', select_gemini)
+    
+    for widget in [ollama_btn, ollama_content, ollama_icon_lbl, ollama_text]:
+        widget.bind('<Button-1>', select_ollama)
+    
+    for widget in [qwen_btn, qwen_content, qwen_icon_lbl, qwen_text]:
+        widget.bind('<Button-1>', select_qwen)
+    
+    # Register provider toggle widgets for theme updates
+    themed_widgets.extend([
+        {'widget': provider_section, 'type': 'bg_only'},
+        {'widget': provider_header, 'type': 'bg_only'},
+        {'widget': provider_icon, 'type': 'text'},
+        {'widget': provider_title, 'type': 'text'},
+        {'widget': provider_desc, 'type': 'secondary'},
+        {'widget': toggle_container, 'type': 'bg_only'},
+        {'widget': toggle_inner, 'type': 'light'},
+    ])
+    
+    # === OLLAMA SETTINGS SECTION ===
     ollama_section = tk.Frame(content_frame, bg=card_bg)
     ollama_section.pack(fill=tk.X, pady=(0, 20))
     
     ollama_header = tk.Frame(ollama_section, bg=card_bg)
     ollama_header.pack(fill=tk.X)
     
-    ollama_icon = tk.Label(ollama_header, text="🦙", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
+    ollama_icon = tk.Label(ollama_header, text="⚙️", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
     ollama_icon.pack(side=tk.LEFT)
     
-    ollama_title = tk.Label(ollama_header, text="Ollama (Local/Remote)", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
+    ollama_title = tk.Label(ollama_header, text="Ollama Settings", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
     ollama_title.pack(side=tk.LEFT, padx=(6, 0))
     
     ollama_desc = tk.Label(
         ollama_section,
-        text="Connect to Ollama server (local or AWS)",
+        text="Configure Ollama server connection (local or remote)",
         font=(get_system_font(), 9),
         bg=card_bg,
         fg=secondary_text
     )
     ollama_desc.pack(anchor='w', pady=(4, 8))
-    
-    # Enable Ollama checkbox
-    ollama_enabled_var = tk.BooleanVar(value=app_config.get("ollama_enabled", False))
-    
-    ollama_enable_frame = tk.Frame(ollama_section, bg=card_bg)
-    ollama_enable_frame.pack(fill=tk.X, pady=(0, 8))
-    
-    ollama_cb_box = tk.Frame(ollama_enable_frame, bg=border_color, width=20, height=20, cursor='hand2')
-    ollama_cb_box.pack(side=tk.LEFT)
-    ollama_cb_box.pack_propagate(False)
-    
-    ollama_cb_inner = tk.Frame(ollama_cb_box, bg=light_gray)
-    ollama_cb_inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
-    
-    ollama_cb_check = tk.Label(ollama_cb_inner, text="", font=(get_system_font(), 10), bg=light_gray, fg=accent_color)
-    ollama_cb_check.pack(expand=True)
-    
-    def update_ollama_checkbox():
-        if ollama_enabled_var.get():
-            ollama_cb_check.config(text="✓")
-            ollama_cb_box.config(bg=accent_color)
-        else:
-            ollama_cb_check.config(text="")
-            ollama_cb_box.config(bg=border_color)
-    
-    def toggle_ollama_cb(e=None):
-        ollama_enabled_var.set(not ollama_enabled_var.get())
-        update_ollama_checkbox()
-    
-    update_ollama_checkbox()
-    
-    for widget in [ollama_cb_box, ollama_cb_inner, ollama_cb_check]:
-        widget.bind('<Button-1>', toggle_ollama_cb)
-    
-    ollama_enable_label = tk.Label(ollama_enable_frame, text="Use Ollama instead of Gemini", font=(get_system_font(), 10), bg=card_bg, fg=text_color, cursor='hand2')
-    ollama_enable_label.pack(side=tk.LEFT, padx=(10, 0))
-    ollama_enable_label.bind('<Button-1>', toggle_ollama_cb)
     
     # Ollama URL input
     ollama_url_label = tk.Label(
@@ -2376,10 +2784,6 @@ def show_settings_popup():
         {'widget': ollama_icon, 'type': 'text'},
         {'widget': ollama_title, 'type': 'text'},
         {'widget': ollama_desc, 'type': 'secondary'},
-        {'widget': ollama_enable_frame, 'type': 'bg_only'},
-        {'widget': ollama_cb_inner, 'type': 'light'},
-        {'widget': ollama_cb_check, 'type': 'light'},
-        {'widget': ollama_enable_label, 'type': 'text'},
         {'widget': ollama_url_label, 'type': 'secondary'},
         {'widget': ollama_url_inner, 'type': 'light'},
         {'widget': ollama_url_entry, 'type': 'dropdown_text'},
@@ -2392,6 +2796,270 @@ def show_settings_popup():
         {'widget': ollama_btn_frame, 'type': 'bg_only'},
         {'widget': ollama_status, 'type': 'secondary'},
         {'widget': ollama_refresh_btn, 'type': 'button_accent'},
+    ])
+    
+    # === QWEN SETTINGS SECTION ===
+    qwen_section = tk.Frame(content_frame, bg=card_bg)
+    qwen_section.pack(fill=tk.X, pady=(0, 20))
+    
+    qwen_header = tk.Frame(qwen_section, bg=card_bg)
+    qwen_header.pack(fill=tk.X)
+    
+    qwen_icon = tk.Label(qwen_header, text="🌟", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
+    qwen_icon.pack(side=tk.LEFT)
+    
+    qwen_title = tk.Label(qwen_header, text="Qwen Settings", font=(get_system_font(), 11, 'bold'), bg=card_bg, fg=text_color)
+    qwen_title.pack(side=tk.LEFT, padx=(6, 0))
+    
+    qwen_desc = tk.Label(
+        qwen_section,
+        text="Configure Qwen API (Alibaba Cloud DashScope)",
+        font=(get_system_font(), 9),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    qwen_desc.pack(anchor='w', pady=(4, 8))
+    
+    # Qwen API Key input
+    qwen_api_label = tk.Label(
+        qwen_section,
+        text="Qwen API Key:",
+        font=(get_system_font(), 9),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    qwen_api_label.pack(anchor='w', pady=(4, 4))
+    
+    qwen_api_frame = tk.Frame(qwen_section, bg=border_color)
+    qwen_api_frame.pack(fill=tk.X)
+    
+    qwen_api_inner = tk.Frame(qwen_api_frame, bg=light_gray)
+    qwen_api_inner.pack(fill=tk.X, padx=1, pady=1)
+    
+    qwen_api_key_var = tk.StringVar(value=app_config.get("qwen_api_key", ""))
+    qwen_show_key_var = tk.BooleanVar(value=False)
+    
+    qwen_api_entry = tk.Entry(
+        qwen_api_inner,
+        textvariable=qwen_api_key_var,
+        font=(get_system_font(), 10),
+        bg=light_gray,
+        fg=text_color,
+        relief=tk.FLAT,
+        show="•"
+    )
+    qwen_api_entry.pack(fill=tk.X, padx=12, pady=10)
+    
+    # Show/hide toggle for Qwen API key
+    def toggle_qwen_show_key():
+        if qwen_show_key_var.get():
+            qwen_api_entry.config(show="")
+            qwen_show_key_btn.config(text="🙈")
+        else:
+            qwen_api_entry.config(show="•")
+            qwen_show_key_btn.config(text="👁")
+        qwen_show_key_var.set(not qwen_show_key_var.get())
+    
+    qwen_show_key_btn = tk.Label(
+        qwen_header,
+        text="👁",
+        font=(get_system_font(), 10),
+        bg=card_bg,
+        fg=secondary_text,
+        cursor='hand2'
+    )
+    qwen_show_key_btn.pack(side=tk.RIGHT)
+    qwen_show_key_btn.bind('<Button-1>', lambda e: toggle_qwen_show_key())
+    qwen_show_key_btn.bind('<Enter>', lambda e: qwen_show_key_btn.config(fg=text_color))
+    qwen_show_key_btn.bind('<Leave>', lambda e: qwen_show_key_btn.config(fg=secondary_text))
+    
+    qwen_api_link = tk.Label(
+        qwen_section,
+        text="Get your API key from Alibaba Cloud DashScope →",
+        font=(get_system_font(), 9, 'underline'),
+        bg=card_bg,
+        fg=accent_color,
+        cursor='hand2'
+    )
+    qwen_api_link.pack(anchor='w', pady=(4, 8))
+    qwen_api_link.bind('<Button-1>', lambda e: open_url("https://dashscope.console.aliyun.com/apiKey"))
+    
+    # Qwen model selection
+    qwen_model_label = tk.Label(
+        qwen_section,
+        text="Qwen Model:",
+        font=(get_system_font(), 9),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    qwen_model_label.pack(anchor='w', pady=(4, 4))
+    
+    qwen_model_frame = tk.Frame(qwen_section, bg=border_color)
+    qwen_model_frame.pack(fill=tk.X)
+    
+    qwen_model_inner = tk.Frame(qwen_model_frame, bg=light_gray)
+    qwen_model_inner.pack(fill=tk.X, padx=1, pady=1)
+    
+    qwen_model_listbox_frame = tk.Frame(qwen_model_inner, bg=light_gray)
+    qwen_model_listbox_frame.pack(fill=tk.X)
+    
+    qwen_current_model_var = tk.StringVar(value=app_config.get("qwen_model", "qwen-vl-max"))
+    
+    qwen_model_display = tk.Label(
+        qwen_model_listbox_frame,
+        textvariable=qwen_current_model_var,
+        font=(get_system_font(), 10),
+        bg=light_gray,
+        fg=text_color,
+        anchor='w',
+        padx=12,
+        pady=10,
+        cursor='hand2'
+    )
+    qwen_model_display.pack(fill=tk.X)
+    
+    qwen_arrow_label = tk.Label(
+        qwen_model_listbox_frame,
+        text="▼",
+        font=(get_system_font(), 8),
+        bg=light_gray,
+        fg=secondary_text
+    )
+    qwen_arrow_label.place(relx=0.95, rely=0.5, anchor='center')
+    
+    # Dropdown list for Qwen models
+    qwen_dropdown_list_frame = tk.Frame(qwen_section, bg=border_color)
+    qwen_dropdown_listbox = tk.Listbox(
+        qwen_dropdown_list_frame,
+        font=(get_system_font(), 9),
+        bg=light_gray,
+        fg=text_color,
+        selectbackground=accent_color,
+        selectforeground='white',
+        relief=tk.FLAT,
+        highlightthickness=0,
+        height=5,
+        activestyle='none'
+    )
+    
+    qwen_dropdown_scrollbar = tk.Scrollbar(qwen_dropdown_list_frame, orient="vertical", command=qwen_dropdown_listbox.yview)
+    qwen_dropdown_listbox.configure(yscrollcommand=qwen_dropdown_scrollbar.set)
+    
+    qwen_dropdown_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1, pady=1)
+    qwen_dropdown_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    qwen_dropdown_visible = [False]
+    
+    def populate_qwen_models():
+        qwen_dropdown_listbox.delete(0, tk.END)
+        if qwen_available_models:
+            for m in qwen_available_models:
+                qwen_dropdown_listbox.insert(tk.END, m)
+        else:
+            # Default models
+            default_qwen_models = ["qwen-vl-max", "qwen-vl-plus", "qwen2-vl-7b-instruct", "qwen-vl-max-latest", "Qwen3-Coder-Plus"]
+            for m in default_qwen_models:
+                qwen_dropdown_listbox.insert(tk.END, m)
+    
+    def toggle_qwen_dropdown(e=None):
+        if qwen_dropdown_visible[0]:
+            qwen_dropdown_list_frame.pack_forget()
+            qwen_dropdown_visible[0] = False
+        else:
+            qwen_dropdown_list_frame.pack(fill=tk.X, pady=(2, 0))
+            qwen_dropdown_visible[0] = True
+    
+    def select_qwen_model(e=None):
+        selection = qwen_dropdown_listbox.curselection()
+        if selection:
+            selected = qwen_dropdown_listbox.get(selection[0])
+            qwen_current_model_var.set(selected)
+            toggle_qwen_dropdown()
+    
+    qwen_model_display.bind('<Button-1>', toggle_qwen_dropdown)
+    qwen_arrow_label.bind('<Button-1>', toggle_qwen_dropdown)
+    qwen_dropdown_listbox.bind('<Double-1>', select_qwen_model)
+    qwen_dropdown_listbox.bind('<Return>', select_qwen_model)
+    
+    # Status and refresh buttons for Qwen
+    qwen_btn_frame = tk.Frame(qwen_section, bg=card_bg)
+    qwen_btn_frame.pack(fill=tk.X, pady=(8, 0))
+    
+    qwen_status = tk.Label(
+        qwen_btn_frame,
+        text="",
+        font=(get_system_font(), 9),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    qwen_status.pack(side=tk.LEFT)
+    
+    def test_qwen_connection():
+        """Test connection to Qwen API and fetch models."""
+        qwen_refresh_btn.config(text="⏳ Connecting...")
+        settings_window.update()
+        
+        api_key = qwen_api_key_var.get().strip()
+        if not api_key:
+            qwen_status.config(text="⚠ Please enter API key first", fg='#f59e0b')
+            qwen_refresh_btn.config(text="🔄 Refresh Models")
+            return
+        
+        models = fetch_qwen_models(api_key)
+        
+        if models:
+            qwen_status.config(text=f"✓ Connected - {len(models)} models found", fg=green_accent)
+            populate_qwen_models()
+            # Auto-select first model if none selected
+            current = qwen_current_model_var.get()
+            if not current or current not in models:
+                qwen_current_model_var.set(models[0])
+        else:
+            qwen_status.config(text="✗ Connection failed - using defaults", fg='#f59e0b')
+            populate_qwen_models()
+        
+        qwen_refresh_btn.config(text="🔄 Refresh Models")
+    
+    qwen_refresh_btn = tk.Button(
+        qwen_btn_frame,
+        text="🔄 Refresh Models",
+        command=test_qwen_connection,
+        font=(get_system_font(), 9),
+        bg=accent_color,
+        fg='white',
+        relief=tk.FLAT,
+        padx=10,
+        pady=4,
+        cursor='hand2',
+        borderwidth=0,
+        activebackground=theme['btn_hover'],
+        activeforeground='white'
+    )
+    qwen_refresh_btn.pack(side=tk.RIGHT)
+    
+    # Populate with default/existing models
+    populate_qwen_models()
+    
+    # Register Qwen widgets for theme updates
+    themed_widgets.extend([
+        {'widget': qwen_section, 'type': 'bg_only'},
+        {'widget': qwen_header, 'type': 'bg_only'},
+        {'widget': qwen_icon, 'type': 'text'},
+        {'widget': qwen_title, 'type': 'text'},
+        {'widget': qwen_desc, 'type': 'secondary'},
+        {'widget': qwen_api_label, 'type': 'secondary'},
+        {'widget': qwen_api_inner, 'type': 'light'},
+        {'widget': qwen_api_entry, 'type': 'dropdown_text'},
+        {'widget': qwen_show_key_btn, 'type': 'secondary'},
+        {'widget': qwen_api_link, 'type': 'secondary'},
+        {'widget': qwen_model_label, 'type': 'secondary'},
+        {'widget': qwen_model_inner, 'type': 'light'},
+        {'widget': qwen_model_listbox_frame, 'type': 'light'},
+        {'widget': qwen_model_display, 'type': 'dropdown_text'},
+        {'widget': qwen_arrow_label, 'type': 'secondary'},
+        {'widget': qwen_btn_frame, 'type': 'bg_only'},
+        {'widget': qwen_status, 'type': 'secondary'},
+        {'widget': qwen_refresh_btn, 'type': 'button_accent'},
     ])
     
     # === MODEL SELECTION SECTION ===
@@ -2417,7 +3085,7 @@ def show_settings_popup():
     model_desc.pack(anchor='w', pady=(4, 8))
     
     # Model dropdown
-    model_var = tk.StringVar(value=app_config.get("model", "models/gemini-3-flash-preview"))
+    model_var = tk.StringVar(value=app_config.get("model", "models/gemini-2.0-flash"))
     
     # Create a styled frame for the dropdown
     dropdown_frame = tk.Frame(model_section, bg=border_color)
@@ -2437,7 +3105,7 @@ def show_settings_popup():
     model_listbox_frame.pack(fill=tk.X)
     
     # Current selection display
-    current_model_var = tk.StringVar(value=get_model_display_name(app_config.get("model", "models/gemini-3-flash-preview")))
+    current_model_var = tk.StringVar(value=get_model_display_name(app_config.get("model", "models/gemini-2.0-flash")))
     
     model_display = tk.Label(
         model_listbox_frame,
@@ -2487,8 +3155,8 @@ def show_settings_popup():
     def populate_models():
         dropdown_listbox.delete(0, tk.END)
         models_to_show = available_models if available_models else [
-            "models/gemini-2.5-flash",
-            "models/gemini-2.5-pro-preview-05-06",
+            "models/gemini-2.0-flash",
+            "models/gemini-2.0-flash-lite",
             "models/gemini-1.5-flash",
             "models/gemini-1.5-pro"
         ]
@@ -3155,12 +3823,22 @@ def show_settings_popup():
         app_config["api_key"] = new_api_key
         API_KEY = new_api_key
         
+        # Update provider config based on 3-way toggle
+        current_provider = provider_var.get()
+        app_config["ollama_enabled"] = (current_provider == "ollama")
+        app_config["qwen_enabled"] = (current_provider == "qwen")
+        
         # Update Ollama config
-        app_config["ollama_enabled"] = ollama_enabled_var.get()
         app_config["ollama_url"] = ollama_url_var.get().strip()
         ollama_model_selected = ollama_current_model_var.get()
         if ollama_model_selected and ollama_model_selected != "Select a model...":
             app_config["ollama_model"] = ollama_model_selected
+        
+        # Update Qwen config
+        app_config["qwen_api_key"] = qwen_api_key_var.get().strip()
+        qwen_model_selected = qwen_current_model_var.get()
+        if qwen_model_selected:
+            app_config["qwen_model"] = qwen_model_selected
         
         # Update config
         app_config["model"] = model_var.get()
@@ -3183,8 +3861,8 @@ def show_settings_popup():
         # Save to file
         save_config(app_config)
         
-        # Reconfigure API if key changed (only if not using Ollama)
-        if not ollama_enabled_var.get():
+        # Reconfigure API if key changed (only if using Gemini)
+        if current_provider == "gemini":
             if api_key_changed and new_api_key:
                 configure_genai()
             else:
@@ -3303,6 +3981,696 @@ def show_settings_popup():
     settings_window.after(10, fade_in)
 
 
+def show_chat_window():
+    """Show a ChatGPT-style interface for custom prompts with screenshot support."""
+    global chat_window, app_config, available_models, qwen_available_models
+    
+    # Close existing chat window if any
+    if chat_window and chat_window.winfo_exists():
+        chat_window.destroy()
+    
+    # Get theme
+    current_theme = app_config.get("theme", "light")
+    theme = THEMES[current_theme]
+    stealth_enabled = app_config.get("stealth_mode", True)
+    
+    # Create chat window
+    chat_window = tk.Toplevel()
+    chat_window.title("")
+    chat_window.geometry("700x800+100+50")
+    chat_window.overrideredirect(True)
+    
+    # Make it always on top
+    chat_window.attributes('-topmost', True)
+    chat_window.attributes('-alpha', 0.0)
+    
+    # Apply window style with stealth mode
+    apply_window_style(chat_window, 'tool', stealth=stealth_enabled, allow_input=True)
+    
+    # Force focus
+    chat_window.focus_force()
+    
+    # Get colors from current theme
+    card_bg = theme['card_bg']
+    text_color = theme['text_color']
+    secondary_text = theme['secondary_text']
+    border_color = theme['border_color']
+    accent_color = theme['accent_color']
+    light_gray = theme['light_gray']
+    green_accent = theme['green_accent']
+    
+    # Chat state
+    chat_messages = []  # List of {"role": "user"/"assistant", "content": str, "image": PIL.Image or None}
+    attached_screenshot = [None]  # Mutable container for attached screenshot
+    
+    # Apply transparency
+    apply_transparency(chat_window, '#000000')
+    
+    # Main canvas for rounded corners
+    canvas = tk.Canvas(chat_window, width=700, height=800, bg='#000000', highlightthickness=0)
+    canvas.pack(fill=tk.BOTH, expand=True)
+    
+    # Draw rounded rectangle background
+    radius = 16
+    x1, y1, x2, y2 = 0, 0, 700, 800
+    
+    canvas.create_arc(x1, y1, x1+radius*2, y1+radius*2, start=90, extent=90, fill=card_bg, outline=card_bg)
+    canvas.create_arc(x2-radius*2, y1, x2, y1+radius*2, start=0, extent=90, fill=card_bg, outline=card_bg)
+    canvas.create_arc(x1, y2-radius*2, x1+radius*2, y2, start=180, extent=90, fill=card_bg, outline=card_bg)
+    canvas.create_arc(x2-radius*2, y2-radius*2, x2, y2, start=270, extent=90, fill=card_bg, outline=card_bg)
+    canvas.create_rectangle(x1+radius, y1, x2-radius, y2, fill=card_bg, outline=card_bg)
+    canvas.create_rectangle(x1, y1+radius, x2, y2-radius, fill=card_bg, outline=card_bg)
+    
+    # Main card frame
+    main_card = tk.Frame(canvas, bg=card_bg)
+    canvas.create_window(350, 400, window=main_card, width=696, height=796)
+    
+    # Top bar
+    top_bar = tk.Frame(main_card, bg=card_bg, height=50)
+    top_bar.pack(fill=tk.X)
+    top_bar.pack_propagate(False)
+    
+    # Title
+    title_row = tk.Frame(top_bar, bg=card_bg)
+    title_row.pack(side=tk.LEFT, padx=16, pady=12)
+    
+    title_icon = tk.Label(title_row, text="💬", font=(get_system_font(), 14), bg=card_bg, fg=text_color)
+    title_icon.pack(side=tk.LEFT)
+    
+    title_label = tk.Label(title_row, text="ElAnswer Chat", font=(get_system_font(), 14, 'bold'), bg=card_bg, fg=text_color)
+    title_label.pack(side=tk.LEFT, padx=(8, 0))
+    
+    # Close button
+    def fade_out(alpha=0.98):
+        if not chat_window or not chat_window.winfo_exists():
+            return
+        if alpha > 0:
+            alpha -= 0.12
+            chat_window.attributes('-alpha', alpha)
+            chat_window.after(12, lambda: fade_out(alpha))
+        else:
+            chat_window.destroy()
+    
+    close_btn = tk.Label(
+        top_bar,
+        text="×",
+        font=(get_system_font(), 22),
+        bg=card_bg,
+        fg=theme['close_btn_fg'],
+        cursor='hand2'
+    )
+    close_btn.pack(side=tk.RIGHT, padx=16)
+    close_btn.bind('<Enter>', lambda e: close_btn.config(fg=theme['close_btn_hover']))
+    close_btn.bind('<Leave>', lambda e: close_btn.config(fg=theme['close_btn_fg']))
+    close_btn.bind('<Button-1>', lambda e: fade_out())
+    
+    # Separator
+    sep1 = tk.Frame(main_card, bg=border_color, height=1)
+    sep1.pack(fill=tk.X)
+    
+    # === MODEL SELECTOR ===
+    model_bar = tk.Frame(main_card, bg=card_bg)
+    model_bar.pack(fill=tk.X, padx=16, pady=8)
+    
+    model_label = tk.Label(model_bar, text="Model:", font=(get_system_font(), 10), bg=card_bg, fg=text_color)
+    model_label.pack(side=tk.LEFT)
+    
+    # Combine Gemini, Qwen, and Ollama models
+    def get_all_models():
+        models = []
+        # Add Gemini models
+        gemini_models = available_models if available_models else [
+            "models/gemini-2.0-flash",
+            "models/gemini-2.0-flash-lite",
+            "models/gemini-1.5-flash",
+            "models/gemini-1.5-pro"
+        ]
+        for m in gemini_models:
+            display_name = m.replace("models/", "")
+            models.append(("gemini", m, f"✨ {display_name}"))
+        
+        # Add Ollama models if available
+        if ollama_available_models:
+            for m in ollama_available_models:
+                models.append(("ollama", m, f"🦙 {m}"))
+        
+        # Add Qwen models
+        qwen_models = qwen_available_models if qwen_available_models else [
+            "qwen-vl-max",
+            "qwen-vl-plus",
+            "qwen2-vl-7b-instruct",
+            "Qwen3-Coder-Plus"
+        ]
+        for m in qwen_models:
+            models.append(("qwen", m, f"🌟 {m}"))
+        
+        return models
+    
+    all_models = get_all_models()
+    
+    # Get default model based on current config
+    def get_default_model():
+        if app_config.get("ollama_enabled", False):
+            return app_config.get("ollama_model", "")
+        elif app_config.get("qwen_enabled", False):
+            return app_config.get("qwen_model", "qwen-vl-max")
+        else:
+            return app_config.get("model", "models/gemini-2.0-flash")
+    
+    def get_default_provider():
+        if app_config.get("ollama_enabled", False):
+            return "ollama"
+        elif app_config.get("qwen_enabled", False):
+            return "qwen"
+        else:
+            return "gemini"
+    
+    current_model_var = tk.StringVar(value=get_default_model())
+    current_provider_var = tk.StringVar(value=get_default_provider())
+    
+    # Model dropdown frame
+    model_dropdown_frame = tk.Frame(model_bar, bg=border_color)
+    model_dropdown_frame.pack(side=tk.LEFT, padx=(10, 0))
+    
+    model_dropdown_inner = tk.Frame(model_dropdown_frame, bg=light_gray)
+    model_dropdown_inner.pack(padx=1, pady=1)
+    
+    # Find display name for current model
+    def get_display_for_model(model_id):
+        for provider, mid, display in all_models:
+            if mid == model_id:
+                return display
+        return model_id
+    
+    model_display_var = tk.StringVar(value=get_display_for_model(get_default_model()))
+    
+    model_display = tk.Label(
+        model_dropdown_inner,
+        textvariable=model_display_var,
+        font=(get_system_font(), 10),
+        bg=light_gray,
+        fg=text_color,
+        padx=12,
+        pady=6,
+        cursor='hand2',
+        width=25,
+        anchor='w'
+    )
+    model_display.pack(side=tk.LEFT)
+    
+    model_arrow = tk.Label(
+        model_dropdown_inner,
+        text="▼",
+        font=(get_system_font(), 8),
+        bg=light_gray,
+        fg=secondary_text
+    )
+    model_arrow.pack(side=tk.LEFT, padx=(0, 8))
+    
+    # Model dropdown list
+    model_list_frame = tk.Frame(main_card, bg=border_color)
+    model_listbox = tk.Listbox(
+        model_list_frame,
+        font=(get_system_font(), 9),
+        bg=light_gray,
+        fg=text_color,
+        selectbackground=accent_color,
+        selectforeground='white',
+        relief=tk.FLAT,
+        highlightthickness=0,
+        height=8,
+        activestyle='none'
+    )
+    
+    for provider, model_id, display_name in all_models:
+        model_listbox.insert(tk.END, display_name)
+    
+    model_scrollbar = tk.Scrollbar(model_list_frame, orient="vertical", command=model_listbox.yview)
+    model_listbox.configure(yscrollcommand=model_scrollbar.set)
+    
+    model_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1, pady=1)
+    model_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    model_dropdown_visible = [False]
+    
+    def toggle_model_dropdown(e=None):
+        if model_dropdown_visible[0]:
+            model_list_frame.pack_forget()
+            model_dropdown_visible[0] = False
+        else:
+            model_list_frame.pack(fill=tk.X, padx=16, pady=(0, 8))
+            model_dropdown_visible[0] = True
+    
+    def select_chat_model(e=None):
+        selection = model_listbox.curselection()
+        if selection:
+            idx = selection[0]
+            provider, model_id, display_name = all_models[idx]
+            current_model_var.set(model_id)
+            current_provider_var.set(provider)
+            model_display_var.set(display_name)
+            toggle_model_dropdown()
+    
+    model_display.bind('<Button-1>', toggle_model_dropdown)
+    model_arrow.bind('<Button-1>', toggle_model_dropdown)
+    model_listbox.bind('<Double-1>', select_chat_model)
+    model_listbox.bind('<Return>', select_chat_model)
+    
+    # Refresh models button
+    def refresh_all_models():
+        refresh_btn.config(text="⏳")
+        chat_window.update()
+        # Fetch Gemini models
+        threading.Thread(target=fetch_available_models, daemon=True).start()
+        # Fetch Ollama models if enabled
+        ollama_url = app_config.get("ollama_url", "http://localhost:11434")
+        if ollama_url:
+            threading.Thread(target=lambda: fetch_ollama_models(ollama_url), daemon=True).start()
+        # Fetch Qwen models if API key exists
+        qwen_key = app_config.get("qwen_api_key", "")
+        if qwen_key:
+            threading.Thread(target=lambda: fetch_qwen_models(qwen_key), daemon=True).start()
+        
+        def update_list():
+            nonlocal all_models
+            all_models = get_all_models()
+            model_listbox.delete(0, tk.END)
+            for provider, model_id, display_name in all_models:
+                model_listbox.insert(tk.END, display_name)
+            refresh_btn.config(text="🔄")
+        
+        chat_window.after(2000, update_list)
+    
+    refresh_btn = tk.Label(
+        model_bar,
+        text="🔄",
+        font=(get_system_font(), 10),
+        bg=card_bg,
+        fg=secondary_text,
+        cursor='hand2'
+    )
+    refresh_btn.pack(side=tk.LEFT, padx=(8, 0))
+    refresh_btn.bind('<Button-1>', lambda e: refresh_all_models())
+    refresh_btn.bind('<Enter>', lambda e: refresh_btn.config(fg=text_color))
+    refresh_btn.bind('<Leave>', lambda e: refresh_btn.config(fg=secondary_text))
+    
+    # === CHAT DISPLAY AREA ===
+    chat_container = tk.Frame(main_card, bg=card_bg)
+    chat_container.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
+    
+    chat_canvas = tk.Canvas(chat_container, bg=card_bg, highlightthickness=0)
+    chat_scrollbar = tk.Scrollbar(chat_container, orient="vertical", command=chat_canvas.yview)
+    chat_frame = tk.Frame(chat_canvas, bg=card_bg)
+    
+    chat_frame.bind(
+        "<Configure>",
+        lambda e: chat_canvas.configure(scrollregion=chat_canvas.bbox("all"))
+    )
+    
+    chat_canvas.create_window((0, 0), window=chat_frame, anchor="nw", width=650)
+    chat_canvas.configure(yscrollcommand=chat_scrollbar.set)
+    
+    chat_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    chat_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def on_chat_mousewheel(event):
+        chat_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+    
+    chat_canvas.bind_all("<MouseWheel>", on_chat_mousewheel)
+    
+    # Welcome message
+    welcome_frame = tk.Frame(chat_frame, bg=card_bg)
+    welcome_frame.pack(fill=tk.X, pady=20)
+    
+    welcome_icon = tk.Label(welcome_frame, text="🤖", font=(get_system_font(), 32), bg=card_bg, fg=text_color)
+    welcome_icon.pack()
+    
+    welcome_text = tk.Label(
+        welcome_frame,
+        text="How can I help you today?",
+        font=(get_system_font(), 14),
+        bg=card_bg,
+        fg=text_color
+    )
+    welcome_text.pack(pady=(8, 0))
+    
+    welcome_hint = tk.Label(
+        welcome_frame,
+        text="Type a message or attach a screenshot to analyze",
+        font=(get_system_font(), 10),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    welcome_hint.pack(pady=(4, 0))
+    
+    def add_message_to_chat(role, content, image=None):
+        """Add a message bubble to the chat display."""
+        msg_container = tk.Frame(chat_frame, bg=card_bg)
+        msg_container.pack(fill=tk.X, pady=8)
+        
+        if role == "user":
+            # User message - right aligned with accent color
+            msg_bubble = tk.Frame(msg_container, bg=accent_color)
+            msg_bubble.pack(side=tk.RIGHT, padx=8)
+            
+            msg_inner = tk.Frame(msg_bubble, bg=accent_color)
+            msg_inner.pack(padx=12, pady=8)
+            
+            # Show image if attached
+            if image:
+                try:
+                    # Resize image for display
+                    display_img = image.copy()
+                    display_img.thumbnail((200, 150), Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(display_img)
+                    img_label = tk.Label(msg_inner, image=photo, bg=accent_color)
+                    img_label.image = photo  # Keep reference
+                    img_label.pack(pady=(0, 8))
+                except Exception as e:
+                    logger.debug(f"Could not display image: {e}")
+            
+            msg_text = tk.Label(
+                msg_inner,
+                text=content,
+                font=(get_system_font(), 10),
+                bg=accent_color,
+                fg='white',
+                wraplength=400,
+                justify=tk.LEFT
+            )
+            msg_text.pack()
+            
+        else:
+            # Assistant message - left aligned with light bg
+            msg_row = tk.Frame(msg_container, bg=card_bg)
+            msg_row.pack(side=tk.LEFT, padx=8)
+            
+            # Assistant icon
+            icon_label = tk.Label(msg_row, text="🤖", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
+            icon_label.pack(side=tk.LEFT, anchor='n', padx=(0, 8))
+            
+            msg_bubble = tk.Frame(msg_row, bg=light_gray)
+            msg_bubble.pack(side=tk.LEFT)
+            
+            msg_inner = tk.Frame(msg_bubble, bg=light_gray)
+            msg_inner.pack(padx=12, pady=8)
+            
+            msg_text = tk.Label(
+                msg_inner,
+                text=content,
+                font=(get_system_font(), 10),
+                bg=light_gray,
+                fg=text_color,
+                wraplength=500,
+                justify=tk.LEFT
+            )
+            msg_text.pack()
+        
+        # Scroll to bottom
+        chat_canvas.update_idletasks()
+        chat_canvas.yview_moveto(1.0)
+        
+        return msg_container
+    
+    # === INPUT AREA ===
+    input_section = tk.Frame(main_card, bg=card_bg)
+    input_section.pack(fill=tk.X, padx=16, pady=(8, 16))
+    
+    # Screenshot preview area
+    preview_frame = tk.Frame(input_section, bg=card_bg)
+    preview_frame.pack(fill=tk.X, pady=(0, 8))
+    
+    preview_label = tk.Label(preview_frame, text="", bg=card_bg, fg=text_color)
+    preview_label.pack(side=tk.LEFT)
+    
+    def update_preview():
+        if attached_screenshot[0]:
+            try:
+                # Create thumbnail
+                img = attached_screenshot[0].copy()
+                img.thumbnail((80, 60), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                preview_label.config(image=photo, text="")
+                preview_label.image = photo
+                remove_btn.pack(side=tk.LEFT, padx=(8, 0))
+            except Exception as e:
+                preview_label.config(text="📷 Screenshot attached", image='')
+                remove_btn.pack(side=tk.LEFT, padx=(8, 0))
+        else:
+            preview_label.config(image='', text="")
+            preview_label.image = None
+            remove_btn.pack_forget()
+    
+    def remove_screenshot():
+        attached_screenshot[0] = None
+        update_preview()
+    
+    remove_btn = tk.Label(
+        preview_frame,
+        text="✕",
+        font=(get_system_font(), 10),
+        bg=card_bg,
+        fg='#ef4444',
+        cursor='hand2'
+    )
+    remove_btn.bind('<Button-1>', lambda e: remove_screenshot())
+    
+    # Input row
+    input_row = tk.Frame(input_section, bg=border_color)
+    input_row.pack(fill=tk.X)
+    
+    input_inner = tk.Frame(input_row, bg=light_gray)
+    input_inner.pack(fill=tk.X, padx=1, pady=1)
+    
+    # Screenshot button
+    def capture_for_chat():
+        """Capture screenshot and attach to chat."""
+        # Temporarily hide chat window
+        chat_window.withdraw()
+        chat_window.update()
+        
+        # Small delay to ensure window is hidden
+        import time
+        time.sleep(0.2)
+        
+        # Capture screenshot
+        screenshot = capture_screenshot()
+        
+        # Show chat window again
+        chat_window.deiconify()
+        chat_window.focus_force()
+        
+        if screenshot:
+            attached_screenshot[0] = screenshot
+            update_preview()
+            logger.info("Screenshot attached to chat")
+    
+    screenshot_btn = tk.Label(
+        input_inner,
+        text="📷",
+        font=(get_system_font(), 14),
+        bg=light_gray,
+        fg=secondary_text,
+        cursor='hand2',
+        padx=8,
+        pady=8
+    )
+    screenshot_btn.pack(side=tk.LEFT)
+    screenshot_btn.bind('<Button-1>', lambda e: capture_for_chat())
+    screenshot_btn.bind('<Enter>', lambda e: screenshot_btn.config(fg=text_color))
+    screenshot_btn.bind('<Leave>', lambda e: screenshot_btn.config(fg=secondary_text))
+    
+    # Text input
+    input_text = tk.Text(
+        input_inner,
+        font=(get_system_font(), 10),
+        bg=light_gray,
+        fg=text_color,
+        relief=tk.FLAT,
+        height=3,
+        wrap=tk.WORD,
+        padx=8,
+        pady=8
+    )
+    input_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    input_text.insert("1.0", "")
+    input_text.focus_set()
+    
+    # Placeholder
+    def on_focus_in(e):
+        if input_text.get("1.0", "end-1c") == "Type your message...":
+            input_text.delete("1.0", tk.END)
+            input_text.config(fg=text_color)
+    
+    def on_focus_out(e):
+        if not input_text.get("1.0", "end-1c").strip():
+            input_text.insert("1.0", "Type your message...")
+            input_text.config(fg=secondary_text)
+    
+    # Send message function
+    def send_message(e=None):
+        """Send the current message to the AI."""
+        message = input_text.get("1.0", "end-1c").strip()
+        
+        if not message and not attached_screenshot[0]:
+            return "break"
+        
+        if message == "Type your message...":
+            message = ""
+        
+        # Clear welcome message on first send
+        for widget in chat_frame.winfo_children():
+            widget.destroy()
+        
+        # Add user message to chat
+        user_img = attached_screenshot[0]
+        display_msg = message if message else "(Screenshot)"
+        add_message_to_chat("user", display_msg, image=user_img)
+        
+        # Clear input
+        input_text.delete("1.0", tk.END)
+        screenshot_copy = attached_screenshot[0]
+        attached_screenshot[0] = None
+        update_preview()
+        
+        # Add loading indicator
+        loading_frame = tk.Frame(chat_frame, bg=card_bg)
+        loading_frame.pack(fill=tk.X, pady=8)
+        
+        loading_row = tk.Frame(loading_frame, bg=card_bg)
+        loading_row.pack(side=tk.LEFT, padx=8)
+        
+        loading_icon = tk.Label(loading_row, text="🤖", font=(get_system_font(), 12), bg=card_bg, fg=text_color)
+        loading_icon.pack(side=tk.LEFT, padx=(0, 8))
+        
+        loading_text = tk.Label(loading_row, text="Thinking...", font=(get_system_font(), 10), bg=card_bg, fg=secondary_text)
+        loading_text.pack(side=tk.LEFT)
+        
+        chat_canvas.update_idletasks()
+        chat_canvas.yview_moveto(1.0)
+        
+        # Query AI in background
+        def query_ai():
+            try:
+                provider = current_provider_var.get()
+                model_id = current_model_var.get()
+                
+                prompt = message if message else "Analyze this image and describe what you see."
+                
+                if provider == "ollama":
+                    # Ollama - requires image for vision models
+                    if not screenshot_copy:
+                        raise Exception("Ollama vision models require an image. Please attach a screenshot.")
+                    old_model = app_config.get("ollama_model", "")
+                    app_config["ollama_model"] = model_id
+                    response = query_ollama(screenshot_copy, prompt)
+                    app_config["ollama_model"] = old_model
+                elif provider == "qwen":
+                    # Temporarily set the model
+                    old_model = app_config.get("qwen_model", "")
+                    app_config["qwen_model"] = model_id
+                    # query_qwen handles whether image is required based on model type
+                    response = query_qwen(screenshot_copy, prompt)
+                    app_config["qwen_model"] = old_model
+                else:
+                    # Gemini
+                    temp_model = genai.GenerativeModel(model_id)
+                    if screenshot_copy:
+                        result = temp_model.generate_content([prompt, screenshot_copy])
+                    else:
+                        result = temp_model.generate_content(prompt)
+                    response = result.text
+                
+                # Update UI on main thread
+                def show_response():
+                    loading_frame.destroy()
+                    add_message_to_chat("assistant", response)
+                    # Add to history
+                    add_to_history(response)
+                
+                chat_window.after(0, show_response)
+                
+            except Exception as e:
+                error_msg = f"Error: {str(e)}"
+                logger.error(error_msg)
+                
+                def show_error():
+                    loading_frame.destroy()
+                    add_message_to_chat("assistant", f"❌ {error_msg}")
+                
+                chat_window.after(0, show_error)
+        
+        threading.Thread(target=query_ai, daemon=True).start()
+        
+        return "break"
+    
+    # Bind Enter to send (Shift+Enter for newline)
+    def handle_enter(e):
+        if e.state & 0x1:  # Shift key pressed
+            return  # Allow newline
+        return send_message()
+    
+    input_text.bind('<Return>', handle_enter)
+    
+    # Send button
+    send_btn = tk.Label(
+        input_inner,
+        text="➤",
+        font=(get_system_font(), 16),
+        bg=accent_color,
+        fg='white',
+        cursor='hand2',
+        padx=12,
+        pady=8
+    )
+    send_btn.pack(side=tk.RIGHT)
+    send_btn.bind('<Button-1>', send_message)
+    send_btn.bind('<Enter>', lambda e: send_btn.config(bg=theme['btn_hover']))
+    send_btn.bind('<Leave>', lambda e: send_btn.config(bg=accent_color))
+    
+    # Bottom hint
+    hint_frame = tk.Frame(main_card, bg=card_bg)
+    hint_frame.pack(fill=tk.X, padx=16, pady=(0, 8))
+    
+    hint_text = tk.Label(
+        hint_frame,
+        text=f"📷 Click camera to attach screenshot | Enter to send | Shift+Enter for new line | ESC to close",
+        font=(get_system_font(), 8),
+        bg=card_bg,
+        fg=secondary_text
+    )
+    hint_text.pack()
+    
+    # Animations
+    def fade_in(alpha=0.0):
+        if not chat_window or not chat_window.winfo_exists():
+            return
+        if alpha < 0.98:
+            alpha += 0.1
+            chat_window.attributes('-alpha', alpha)
+            chat_window.after(15, lambda: fade_in(alpha))
+        else:
+            chat_window.attributes('-alpha', 0.98)
+    
+    chat_window.bind('<Escape>', lambda e: fade_out())
+    
+    # Draggable
+    def start_move(event):
+        chat_window.x = event.x
+        chat_window.y = event.y
+    
+    def do_move(event):
+        x = chat_window.winfo_x() + (event.x - chat_window.x)
+        y = chat_window.winfo_y() + (event.y - chat_window.y)
+        chat_window.geometry(f"+{x}+{y}")
+    
+    for widget in [top_bar, title_row, title_label, title_icon]:
+        widget.bind('<Button-1>', start_move)
+        widget.bind('<B1-Motion>', do_move)
+    
+    chat_window.after(10, fade_in)
+
+
 def create_tray_icon():
     """Creates and returns the system tray icon with menu."""
     global tray_icon
@@ -3335,6 +4703,10 @@ def create_tray_icon():
     def on_show_settings(icon, item):
         """Show settings popup from tray menu."""
         root.after(0, show_settings_popup)
+    
+    def on_show_chat(icon, item):
+        """Show chat window from tray menu."""
+        root.after(0, show_chat_window)
     
     def on_quit(icon, item):
         """Quit from tray menu."""
@@ -3401,6 +4773,10 @@ def create_tray_icon():
         pystray.MenuItem(
             f"Hide/Show UI ({HIDE_HOTKEY})",
             on_hide_ui
+        ),
+        pystray.MenuItem(
+            f"ElAnswer Chat ({CHAT_HOTKEY})",
+            on_show_chat
         ),
         pystray.MenuItem(
             f"Settings ({SETTINGS_HOTKEY})",
@@ -3513,6 +4889,7 @@ if __name__ == "__main__":
     keyboard.add_hotkey(COPY_HOTKEY, copy_last_response)
     keyboard.add_hotkey(AUTO_TYPE_HOTKEY, auto_type_last_response)
     keyboard.add_hotkey(PAUSE_TYPE_HOTKEY, toggle_auto_type_pause)
+    keyboard.add_hotkey(CHAT_HOTKEY, show_chat_window)
     keyboard.add_hotkey(QUIT_HOTKEY, quit_application)
     
     # Start system tray icon in separate thread
@@ -3522,9 +4899,11 @@ if __name__ == "__main__":
     # Hide console window (runs minimized in system tray)
     hide_console()
     
-    # If no API key is set and Ollama is not enabled, show settings on first run
+    # If no API key is set and neither Ollama nor Qwen is enabled, show settings on first run
     ollama_enabled = app_config.get("ollama_enabled", False)
-    if not API_KEY and not ollama_enabled:
+    qwen_enabled = app_config.get("qwen_enabled", False)
+    qwen_api_key = app_config.get("qwen_api_key", "")
+    if not API_KEY and not ollama_enabled and not (qwen_enabled and qwen_api_key):
         logger.warning("No API key found. Opening settings...")
         root.after(500, show_settings_popup)
     
