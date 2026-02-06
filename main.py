@@ -39,6 +39,7 @@ import base64
 import io
 from datetime import datetime
 import keyboard  # For detecting key presses
+import mouse  # For mouse button detection
 import google.generativeai as genai
 from PIL import Image, ImageTk  # For image handling
 import tkinter as tk
@@ -380,7 +381,7 @@ COPY_HOTKEY = "ctrl+alt+c"
 AUTO_TYPE_HOTKEY = "ctrl+alt+a"
 
 # The Hotkey combination to pause/resume auto-typing
-PAUSE_TYPE_HOTKEY = "ctrl+alt+="
+PAUSE_TYPE_HOTKEY = "right-click"
 
 # The Hotkey combination to open chat window
 CHAT_HOTKEY = "ctrl+alt+g"
@@ -1584,7 +1585,9 @@ def analyze_screen():
                     f"- Provide clean, efficient, and correct {prog_lang} code\n"
                     f"- Include all necessary imports\n"
                     f"- Handle edge cases\n"
-                    f"- No explanations, comments only if necessary for clarity"
+                    f"- Note: Do NOT include any comments in the code"
+                    f"- Focus on providing a direct code solution without any additional text or explanation"
+                    f"- The code tshould satisfy all the sample test cases shown in the image (if any)"
                 )
             elif show_explanation:
                 prompt = (
@@ -1596,7 +1599,9 @@ def analyze_screen():
                     "[Provide the direct answer. If multiple choice, state the correct option letter and full text]\n\n"
                     "💡 EXPLANATION:\n"
                     "[Provide a clear, concise explanation of why this is correct]\n\n"
+                    "Specify any test cases you can identify from the image and whether the answer satisfies them.\n\n"
                     "Keep the response well-organized and easy to read."
+                    
                 )
             else:
                 prompt = (
@@ -2064,7 +2069,10 @@ def start_auto_type(text=None):
         logger.info(f"Auto-typing started at {wpm} WPM ({len(text)} characters)")
         
         try:
-            for char in text:
+            i = 0
+            while i < len(text):
+                char = text[i]
+                
                 # Check if we should stop
                 if auto_type_stop_event.is_set():
                     logger.info("Auto-typing stopped by user")
@@ -2081,12 +2089,29 @@ def start_auto_type(text=None):
                 
                 # Type the character
                 try:
-                    keyboard.write(char, delay=0)
+                    if char == '\n':
+                        # Type the newline
+                        keyboard.press_and_release('enter')
+                        auto_type_stop_event.wait(char_delay)
+                        
+                        # After newline, IDE may auto-indent. Clear any auto-inserted content.
+                        # Press Home to go to start of line, then Shift+End to select all, then Delete
+                        keyboard.press_and_release('home')
+                        auto_type_stop_event.wait(0.01)
+                        keyboard.press_and_release('shift+end')
+                        auto_type_stop_event.wait(0.01)
+                        keyboard.press_and_release('delete')
+                        auto_type_stop_event.wait(0.01)
+                    else:
+                        keyboard.write(char, delay=0)
                 except Exception as e:
                     logger.debug(f"Error typing character: {e}")
                 
-                # Wait for the delay
-                auto_type_stop_event.wait(char_delay)
+                # Wait for the delay (skip for newline as we already waited)
+                if char != '\n':
+                    auto_type_stop_event.wait(char_delay)
+                
+                i += 1
             
             logger.info("Auto-typing completed")
         except Exception as e:
@@ -2114,7 +2139,7 @@ def stop_auto_type():
     logger.info("Auto-type stopped")
 
 
-def toggle_auto_type_pause():
+def toggle_auto_type_pause(*args):
     """Pause or resume the currently running auto-type."""
     global auto_type_active, auto_type_paused, auto_type_pause_event
     
@@ -2122,16 +2147,20 @@ def toggle_auto_type_pause():
         logger.debug("No auto-type in progress to pause/resume")
         return
     
+    if auto_type_pause_event is None:
+        logger.debug("Pause event not initialized")
+        return
+    
     if auto_type_paused:
         # Resume
         auto_type_pause_event.set()
         auto_type_paused = False
-        logger.info("Auto-type resumed")
+        logger.info("Auto-type RESUMED")
     else:
         # Pause
         auto_type_pause_event.clear()
         auto_type_paused = True
-        logger.info("Auto-type paused. Press " + PAUSE_TYPE_HOTKEY + " to resume.")
+        logger.info("Auto-type PAUSED - Right-click to resume")
 
 
 def auto_type_last_response():
@@ -4888,7 +4917,8 @@ if __name__ == "__main__":
     keyboard.add_hotkey(MODE_HOTKEY, toggle_question_mode)
     keyboard.add_hotkey(COPY_HOTKEY, copy_last_response)
     keyboard.add_hotkey(AUTO_TYPE_HOTKEY, auto_type_last_response)
-    keyboard.add_hotkey(PAUSE_TYPE_HOTKEY, toggle_auto_type_pause)
+    # Right-click to pause/resume auto-typing
+    mouse.on_right_click(toggle_auto_type_pause)
     keyboard.add_hotkey(CHAT_HOTKEY, show_chat_window)
     keyboard.add_hotkey(QUIT_HOTKEY, quit_application)
     
